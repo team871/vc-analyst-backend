@@ -68,7 +68,7 @@ router.post(
           id: pitchDeck._id,
           title: pitchDeck.title,
           description: pitchDeck.description,
-          status: pitchDeck.status,
+          // status: pitchDeck.status,
           uploadedAt: pitchDeck.createdAt,
           analysis: updatedPitchDeck,
         },
@@ -166,18 +166,10 @@ Return this JSON structure:
   }
 }
 
-Keep tone professional, clear, and investor-grade. Output valid JSON only.`,
+Keep tone professional, clear, and investor-grade. Output valid JSON only.
+Thesis: ${latestThesis ? latestThesis.content : "No firm thesis available."}`,
                   },
-                  // Include firm's thesis content for fit evaluation
-                  latestThesis
-                    ? {
-                        type: "text",
-                        text:
-                          "Firm thesis (JSON or text). Use only what's stated:" +
-                          "\n\n" +
-                          String(latestThesis.content).slice(0, 20000),
-                      }
-                    : { type: "text", text: "No firm thesis available." },
+
                   {
                     type: "file_url",
                     file_url: {
