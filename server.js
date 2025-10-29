@@ -11,6 +11,8 @@ const pitchDeckRoutes = require("./routes/pitchDeck");
 const userRoutes = require("./routes/users.js");
 
 const app = express();
+// Trust proxy (so req.secure and IPs work correctly behind Nginx)
+app.set("trust proxy", 1);
 
 // Security middleware
 app.use(helmet());
@@ -18,7 +20,7 @@ app.use(
   cors({
     origin:
       process.env.NODE_ENV === "production"
-        ? "https://yourdomain.com"
+        ? "https://dealassistapi.alfawhocodes.com"
         : "http://localhost:3000",
     credentials: true,
   })
@@ -73,7 +75,7 @@ app.use("*", (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
 
