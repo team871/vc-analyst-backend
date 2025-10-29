@@ -351,12 +351,12 @@ router.get("/:id", authMiddleware, requireSAOrAnalyst, async (req, res) => {
     }
 
     // Generate signed URL for file access
-    const fileUrl = await generateSignedUrl(pitchDeck.originalFileKey);
+    // const fileUrl = await generateSignedUrl(pitchDeck.originalFileKey);
 
     res.json({
       pitchDeck: {
         ...pitchDeck.toObject(),
-        originalFileUrl: fileUrl,
+        // originalFileUrl: fileUrl,
       },
     });
   } catch (error) {
