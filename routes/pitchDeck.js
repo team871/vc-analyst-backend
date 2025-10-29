@@ -55,7 +55,7 @@ router.post(
       await pitchDeck.save();
 
       // Start AI analysis in background (with base64 file)
-      await analyzePitchDeckWithBase64(
+      let updatedPitchDeck = await analyzePitchDeckWithBase64(
         pitchDeck._id,
         encodedFile,
         req.file.originalname,
@@ -70,6 +70,7 @@ router.post(
           description: pitchDeck.description,
           status: pitchDeck.status,
           uploadedAt: pitchDeck.createdAt,
+          analysis: updatedPitchDeck,
         },
       });
     } catch (error) {
@@ -264,21 +265,29 @@ Keep tone professional, clear, and investor-grade. Output valid JSON only.`,
     // const fileUrl = await uploadToS3(fileBuffer, fileKey);
 
     // Update pitch deck with analysis and S3 URLs
-    await PitchDeck.findByIdAndUpdate(pitchDeckId, {
-      analysis: {
-        summary: analysis,
-        analysisDate: new Date(),
-        aiModel: "sonar-pro",
+    const updatedPitchDeck = await PitchDeck.findOneAndUpdate(
+      { _id: pitchDeckId },
+      {
+        $set: {
+          analysis: {
+            summary: analysis,
+            analysisDate: new Date(),
+            aiModel: "sonar-pro",
+          },
+          status: "COMPLETED",
+          // originalFileUrl: fileUrl,
+          // originalFileKey: fileKey,
+          "metadata.analysisDuration": analysisDuration,
+        },
       },
-      status: "COMPLETED",
-      // originalFileUrl: fileUrl,
-      // originalFileKey: fileKey,
-      "metadata.analysisDuration": analysisDuration,
-    });
+      { new: true }
+    );
 
     console.log(
       `Pitch deck ${pitchDeckId} analysis completed in ${analysisDuration}ms`
     );
+
+    return updatedPitchDeck;
   } catch (error) {
     console.error("Pitch deck analysis error:", error);
     await PitchDeck.findByIdAndUpdate(pitchDeckId, {

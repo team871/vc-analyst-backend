@@ -1,0 +1,905 @@
+{
+  "info": {
+    "name": "VC Analyst Platform API",
+    "description": "Complete API testing collection for VC Analyst Platform",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000/api",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Register Super Admin",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "pm.test('Response has token and user data', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('token');",
+                  "  pm.expect(jsonData).to.have.property('user');",
+                  "  pm.expect(jsonData.user).to.have.property('role', 'SA');",
+                  "});",
+                  "",
+                  "// Auto-set environment variables",
+                  "if (pm.response.code === 201) {",
+                  "  const response = pm.response.json();",
+                  "  pm.environment.set('AUTH_TOKEN', response.token);",
+                  "  pm.environment.set('ORGANIZATION_ID', response.user.organization._id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"sa@testvc.com\",\n  \"password\": \"password123\",\n  \"firstName\": \"Super\",\n  \"lastName\": \"Admin\",\n  \"organizationName\": \"Test VC Fund\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/register-sa",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "register-sa"]
+            }
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has token', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('token');",
+                  "});",
+                  "",
+                  "// Auto-set token",
+                  "if (pm.response.code === 200) {",
+                  "  const response = pm.response.json();",
+                  "  pm.environment.set('AUTH_TOKEN', response.token);",
+                  "  pm.environment.set('ORGANIZATION_ID', response.user.organization._id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"sa@testvc.com\",\n  \"password\": \"password123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "Get Current User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has user data', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('user');",
+                  "  pm.expect(jsonData.user).to.have.property('email');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "me"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "User Management",
+      "item": [
+        {
+          "name": "Create Analyst",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "pm.test('Response has user data', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('user');",
+                  "  pm.expect(jsonData.user).to.have.property('role', 'ANALYST');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"analyst@testvc.com\",\n  \"password\": \"password123\",\n  \"firstName\": \"Test\",\n  \"lastName\": \"Analyst\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/users/create-analyst",
+              "host": ["{{baseUrl}}"],
+              "path": ["users", "create-analyst"]
+            }
+          }
+        },
+        {
+          "name": "Get All Analysts",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has analysts array', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('analysts');",
+                  "  pm.expect(jsonData.analysts).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/users/analysts",
+              "host": ["{{baseUrl}}"],
+              "path": ["users", "analysts"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Thesis Management",
+      "item": [
+        {
+          "name": "Upload Thesis",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "pm.test('Response has thesis data', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('thesis');",
+                  "  pm.expect(jsonData.thesis).to.have.property('id');",
+                  "});",
+                  "",
+                  "// Auto-set thesis ID",
+                  "if (pm.response.code === 201) {",
+                  "  const response = pm.response.json();",
+                  "  pm.environment.set('THESIS_ID', response.thesis.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "thesis",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "title",
+                  "value": "Investment Thesis - AI/ML Sector",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/thesis/upload",
+              "host": ["{{baseUrl}}"],
+              "path": ["thesis", "upload"]
+            }
+          }
+        },
+        {
+          "name": "Get All Theses",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has theses array', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('theses');",
+                  "  pm.expect(jsonData.theses).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/thesis",
+              "host": ["{{baseUrl}}"],
+              "path": ["thesis"]
+            }
+          }
+        },
+        {
+          "name": "Get Specific Thesis",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has thesis data', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('thesis');",
+                  "  pm.expect(jsonData.thesis).to.have.property('_id');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/thesis/{{THESIS_ID}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["thesis", "{{THESIS_ID}}"]
+            }
+          }
+        },
+        {
+          "name": "Update Thesis",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has updated thesis', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('thesis');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "thesis",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "title",
+                  "value": "Updated Investment Thesis",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/thesis/{{THESIS_ID}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["thesis", "{{THESIS_ID}}"]
+            }
+          }
+        },
+        {
+          "name": "Delete Thesis",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has success message', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('message');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/thesis/{{THESIS_ID}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["thesis", "{{THESIS_ID}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Pitch Deck Management",
+      "item": [
+        {
+          "name": "Upload Pitch Deck",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "pm.test('Response has pitch deck data', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('pitchDeck');",
+                  "  pm.expect(jsonData.pitchDeck).to.have.property('id');",
+                  "});",
+                  "",
+                  "// Auto-set pitch deck ID",
+                  "if (pm.response.code === 201) {",
+                  "  const response = pm.response.json();",
+                  "  pm.environment.set('PITCH_DECK_ID', response.pitchDeck.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "pitchDeck",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "title",
+                  "value": "Tech Startup Pitch Deck",
+                  "type": "text"
+                },
+                {
+                  "key": "description",
+                  "value": "Series A funding pitch for AI startup",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/pitch-decks/upload",
+              "host": ["{{baseUrl}}"],
+              "path": ["pitch-decks", "upload"]
+            }
+          }
+        },
+        {
+          "name": "Get All Pitch Decks",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has pitch decks array', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('pitchDecks');",
+                  "  pm.expect(jsonData.pitchDecks).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pitch-decks",
+              "host": ["{{baseUrl}}"],
+              "path": ["pitch-decks"]
+            }
+          }
+        },
+        {
+          "name": "Get Specific Pitch Deck",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has pitch deck data', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('pitchDeck');",
+                  "  pm.expect(jsonData.pitchDeck).to.have.property('_id');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pitch-decks/{{PITCH_DECK_ID}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["pitch-decks", "{{PITCH_DECK_ID}}"]
+            }
+          }
+        },
+        {
+          "name": "Delete Pitch Deck",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has success message', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('message');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pitch-decks/{{PITCH_DECK_ID}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["pitch-decks", "{{PITCH_DECK_ID}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Comments",
+      "item": [
+        {
+          "name": "Add Comment to Pitch Deck",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "pm.test('Response has comment data', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('comment');",
+                  "  pm.expect(jsonData.comment).to.have.property('_id');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"The founder also told me that they own the Patent for this product, which may not be included in the Pitch Deck. This could be a significant competitive advantage.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/pitch-decks/{{PITCH_DECK_ID}}/comments",
+              "host": ["{{baseUrl}}"],
+              "path": ["pitch-decks", "{{PITCH_DECK_ID}}", "comments"]
+            }
+          }
+        },
+        {
+          "name": "Get Comments for Pitch Deck",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has comments array', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('comments');",
+                  "  pm.expect(jsonData.comments).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/pitch-decks/{{PITCH_DECK_ID}}/comments",
+              "host": ["{{baseUrl}}"],
+              "path": ["pitch-decks", "{{PITCH_DECK_ID}}", "comments"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "System",
+      "item": [
+        {
+          "name": "Health Check",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has status OK', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('status', 'OK');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Analyst Tests",
+      "item": [
+        {
+          "name": "Login as Analyst",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has analyst token', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('token');",
+                  "  pm.expect(jsonData.user).to.have.property('role', 'ANALYST');",
+                  "});",
+                  "",
+                  "// Auto-set analyst token",
+                  "if (pm.response.code === 200) {",
+                  "  const response = pm.response.json();",
+                  "  pm.environment.set('AUTH_TOKEN', response.token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"analyst@testvc.com\",\n  \"password\": \"password123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "Analyst Try Upload Thesis (Should Fail)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 403', function () {",
+                  "  pm.response.to.have.status(403);",
+                  "});",
+                  "",
+                  "pm.test('Response has permission error', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('message');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "thesis",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "title",
+                  "value": "Analyst Thesis",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/thesis/upload",
+              "host": ["{{baseUrl}}"],
+              "path": ["thesis", "upload"]
+            }
+          }
+        },
+        {
+          "name": "Analyst View Theses (Should Work)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has theses array', function () {",
+                  "  const jsonData = pm.response.json();",
+                  "  pm.expect(jsonData).to.have.property('theses');",
+                  "  pm.expect(jsonData.theses).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{AUTH_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/thesis",
+              "host": ["{{baseUrl}}"],
+              "path": ["thesis"]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Global pre-request script",
+          "// Auto-set environment variables from responses",
+          "if (pm.response && pm.response.json) {",
+          "  try {",
+          "    const response = pm.response.json();",
+          "    ",
+          "    // Auto-set token from login responses",
+          "    if (response.token) {",
+          "      pm.environment.set('AUTH_TOKEN', response.token);",
+          "    }",
+          "    ",
+          "    // Auto-set organization ID",
+          "    if (response.user && response.user.organization && response.user.organization._id) {",
+          "      pm.environment.set('ORGANIZATION_ID', response.user.organization._id);",
+          "    }",
+          "    ",
+          "    // Auto-set thesis ID",
+          "    if (response.thesis && response.thesis.id) {",
+          "      pm.environment.set('THESIS_ID', response.thesis.id);",
+          "    }",
+          "    ",
+          "    // Auto-set pitch deck ID",
+          "    if (response.pitchDeck && response.pitchDeck.id) {",
+          "      pm.environment.set('PITCH_DECK_ID', response.pitchDeck.id);",
+          "    }",
+          "  } catch (e) {",
+          "    // Ignore JSON parse errors",
+          "  }",
+          "}"
+        ]
+      }
+    }
+  ]
+}
