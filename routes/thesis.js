@@ -49,32 +49,54 @@ router.post(
               content: [
                 {
                   type: "text",
-                  text: `This PDF is an investment thesis ABOUT OUR FIRM (goals, preferences, and constraints), not a startup pitch. Extract ONLY what is explicitly present in the document and return a single JSON object with these fields:
+                  text: `You are DealFlow AI — an AI assistant for Venture Capital firms.
 
-firmSummary,
-investmentObjectives,
-targetSectors (array of strings),
-stages (array of strings),
-geographies (array of strings),
-checkSize { min, max, currency },
-ownershipTargets,
-timeHorizon,
-returnTargets,
-riskTolerance,
-constraints (array of strings),
-exclusions (array of strings),
-esgPolicy,
-diligenceFramework { criteria (array of strings), redFlags (array of strings) },
-sourcingStrategy (array of strings),
-portfolioConstruction,
-governancePreferences,
-valueCreationPlan,
-decisionProcess,
-exampleDeals (array of strings),
-openQuestions (array of strings),
-confidenceScore (number 1-10).
+Your job: Analyze this investment thesis document ABOUT OUR FIRM (goals, preferences, and constraints) and produce a structured, investment-grade firm profile.
 
-Rules: Do not fabricate or infer beyond the PDF. If a field is not stated, set it to null (or empty array). Focus on the firm’s preferences rather than company analysis.`,
+Input: A firm thesis document (PDF).
+Output: A single JSON object — concise, factual, and well-structured.
+
+Rules:
+• Extract insights only from the thesis document — no external data or assumptions.
+• If information is missing, mark as "unknown" and briefly note what's missing.
+• Be objective, evidence-based, and avoid speculation.
+• Focus on the firm's investment preferences rather than company analysis.
+
+Return this JSON structure:
+
+{
+  "firmSummary": "Overall description of the firm's investment focus and philosophy (2-3 sentences).",
+  "investmentObjectives": "Primary investment goals and strategic objectives.",
+  "targetSectors": ["List of target sectors/industries for investment."],
+  "stages": ["List of target investment stages (Seed, Series A, etc.)."],
+  "geographies": ["List of target geographic regions."],
+  "checkSize": {
+    "min": "Minimum check size amount",
+    "max": "Maximum check size amount", 
+    "currency": "Currency (USD, EUR, etc.)"
+  },
+  "ownershipTargets": "Target ownership percentage range or preferences.",
+  "timeHorizon": "Typical investment holding period or exit timeline.",
+  "returnTargets": "Expected return targets or IRR goals.",
+  "riskTolerance": "Risk appetite and tolerance levels.",
+  "constraints": ["List of investment constraints or limitations."],
+  "exclusions": ["List of sectors, stages, or deal types to avoid."],
+  "esgPolicy": "ESG (Environmental, Social, Governance) investment policy.",
+  "diligenceFramework": {
+    "criteria": ["List of key due diligence criteria."],
+    "redFlags": ["List of red flags or deal breakers."]
+  },
+  "sourcingStrategy": ["List of deal sourcing strategies and channels."],
+  "portfolioConstruction": "Portfolio construction and allocation strategy.",
+  "governancePreferences": "Board participation and governance preferences.",
+  "valueCreationPlan": "Value creation and portfolio company support approach.",
+  "decisionProcess": "Investment decision-making process and approval workflow.",
+  "exampleDeals": ["List of example deals or case studies mentioned."],
+  "openQuestions": ["Top 5 questions that need clarification about the firm's thesis."],
+  "confidenceScore": 1-10
+}
+
+Keep tone professional, clear, and investor-grade. Output valid JSON only.`,
                 },
                 {
                   type: "file_url",
@@ -218,32 +240,54 @@ router.put(
                 content: [
                   {
                     type: "text",
-                    text: `This PDF is an investment thesis ABOUT OUR FIRM (goals, preferences, and constraints), not a startup pitch. Extract ONLY what is explicitly present in the document and return a single JSON object with these fields:
+                    text: `You are DealFlow AI — an AI assistant for Venture Capital firms.
 
-firmSummary,
-investmentObjectives,
-targetSectors (array of strings),
-stages (array of strings),
-geographies (array of strings),
-checkSize { min, max, currency },
-ownershipTargets,
-timeHorizon,
-returnTargets,
-riskTolerance,
-constraints (array of strings),
-exclusions (array of strings),
-esgPolicy,
-diligenceFramework { criteria (array of strings), redFlags (array of strings) },
-sourcingStrategy (array of strings),
-portfolioConstruction,
-governancePreferences,
-valueCreationPlan,
-decisionProcess,
-exampleDeals (array of strings),
-openQuestions (array of strings),
-confidenceScore (number 1-10).
+Your job: Analyze this investment thesis document ABOUT OUR FIRM (goals, preferences, and constraints) and produce a structured, investment-grade firm profile.
 
-Rules: Do not fabricate or infer beyond the PDF. If a field is not stated, set it to null (or empty array). Focus on the firm’s preferences rather than company analysis.`,
+Input: A firm thesis document (PDF).
+Output: A single JSON object — concise, factual, and well-structured.
+
+Rules:
+• Extract insights only from the thesis document — no external data or assumptions.
+• If information is missing, mark as "unknown" and briefly note what's missing.
+• Be objective, evidence-based, and avoid speculation.
+• Focus on the firm's investment preferences rather than company analysis.
+
+Return this JSON structure:
+
+{
+  "firmSummary": "Overall description of the firm's investment focus and philosophy (2-3 sentences).",
+  "investmentObjectives": "Primary investment goals and strategic objectives.",
+  "targetSectors": ["List of target sectors/industries for investment."],
+  "stages": ["List of target investment stages (Seed, Series A, etc.)."],
+  "geographies": ["List of target geographic regions."],
+  "checkSize": {
+    "min": "Minimum check size amount",
+    "max": "Maximum check size amount", 
+    "currency": "Currency (USD, EUR, etc.)"
+  },
+  "ownershipTargets": "Target ownership percentage range or preferences.",
+  "timeHorizon": "Typical investment holding period or exit timeline.",
+  "returnTargets": "Expected return targets or IRR goals.",
+  "riskTolerance": "Risk appetite and tolerance levels.",
+  "constraints": ["List of investment constraints or limitations."],
+  "exclusions": ["List of sectors, stages, or deal types to avoid."],
+  "esgPolicy": "ESG (Environmental, Social, Governance) investment policy.",
+  "diligenceFramework": {
+    "criteria": ["List of key due diligence criteria."],
+    "redFlags": ["List of red flags or deal breakers."]
+  },
+  "sourcingStrategy": ["List of deal sourcing strategies and channels."],
+  "portfolioConstruction": "Portfolio construction and allocation strategy.",
+  "governancePreferences": "Board participation and governance preferences.",
+  "valueCreationPlan": "Value creation and portfolio company support approach.",
+  "decisionProcess": "Investment decision-making process and approval workflow.",
+  "exampleDeals": ["List of example deals or case studies mentioned."],
+  "openQuestions": ["Top 5 questions that need clarification about the firm's thesis."],
+  "confidenceScore": 1-10
+}
+
+Keep tone professional, clear, and investor-grade. Output valid JSON only.`,
                   },
                   {
                     type: "file_url",

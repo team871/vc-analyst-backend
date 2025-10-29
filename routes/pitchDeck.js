@@ -55,7 +55,7 @@ router.post(
       await pitchDeck.save();
 
       // Start AI analysis in background (with base64 file)
-      analyzePitchDeckWithBase64(
+      await analyzePitchDeckWithBase64(
         pitchDeck._id,
         encodedFile,
         req.file.originalname,
@@ -148,7 +148,19 @@ Return this JSON structure:
   "confidenceScore": 1-10,
 
   "fitAssessment": {
-   
+    "overallFit": "STRONG | PARTIAL | WEAK",
+    "rationale": "Explain main reasons for this fit rating.",
+    "alignment": {
+      "sectors": [{ "match": true/false, "details": "text or 'unknown'" }],
+      "stage": [{ "match": true/false, "details": "text or 'unknown'" }],
+      "geography": [{ "match": true/false, "details": "text or 'unknown'" }],
+      "checkSize": { "match": true/false, "details": "text or 'unknown'" },
+      "ownershipTargets": { "match": true/false, "details": "text or 'unknown'" },
+      "timeHorizon": { "match": true/false, "details": "text or 'unknown'" },
+      "returnTargets": { "match": true/false, "details": "text or 'unknown'" },
+      "riskTolerance": { "match": true/false, "details": "text or 'unknown'" },
+      "constraintsAndExclusions": [{ "violated": true/false, "details": "text or 'unknown'" }]
+    },
     "openQuestions": ["Top 5 questions the analyst should ask to validate assumptions."]
   }
 }
