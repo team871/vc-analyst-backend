@@ -16,15 +16,31 @@ app.set("trust proxy", 1);
 
 // Security middleware
 app.use(helmet());
-app.use(
-  cors({
-    origin:
-      process.env.NODE_ENV === "production"
-        ? "https://dealassistapi.alfawhocodes.com"
-        : "http://localhost:3000",
-    credentials: true,
-  })
-);
+// CORS configuration: allow specific frontends and handle preflight
+const allowedOrigins = [
+  "https://dealassist.alfawhocodes.com",
+  "http://dealassist.alfawhocodes.com",
+  // If you sometimes access via IP directly
+  "http://52.66.157.50",
+  "https://52.66.157.50",
+  // Local development
+  "http://localhost:3000",
+  "https://localhost:3000",
+];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true); // Postman, curl, server-side
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 // Rate limiting
 const limiter = rateLimit({
