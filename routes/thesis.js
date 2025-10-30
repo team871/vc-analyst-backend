@@ -14,6 +14,7 @@ const {
   generateSignedUrl,
 } = require("../utils/s3Upload");
 const Perplexity = require("@perplexity-ai/perplexity_ai");
+const { tryParseJson, toThesisProfile } = require("../utils/helpers");
 
 const router = express.Router();
 const perplexity = new Perplexity();
@@ -26,6 +27,7 @@ router.post(
   upload.single("thesis"),
   async (req, res) => {
     try {
+      console.log("Uploading thesis...");
       if (!req.file) {
         return res.status(400).json({ message: "No file uploaded" });
       }
@@ -116,10 +118,16 @@ Keep tone professional, clear, and investor-grade. Output valid JSON only.`,
         aiContent = "AI analysis failed. Please try again later.";
       }
 
+      // Parse and normalize profile
+      const parsed = tryParseJson(aiContent);
+      const profile = toThesisProfile(parsed);
+
       // Create thesis record (no file storage)
       const thesis = new Thesis({
         title,
         content: aiContent,
+        rawContent: aiContent,
+        profile: profile || undefined,
         originalPdfUrl: "",
         originalPdfKey: "",
         organization: req.user.organization._id,
@@ -301,7 +309,12 @@ Keep tone professional, clear, and investor-grade. Output valid JSON only.`,
             ],
           });
 
-          updateData.content = completion.choices[0].message.content;
+          const aiText = completion.choices[0].message.content;
+          const parsed = tryParseJson(aiText);
+          const profile = toThesisProfile(parsed);
+          updateData.content = aiText;
+          updateData.rawContent = aiText;
+          if (profile) updateData.profile = profile;
         } catch (aiError) {
           console.error("Perplexity AI error:", aiError);
           updateData.content = "AI analysis failed. Please try again later.";

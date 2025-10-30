@@ -12,6 +12,7 @@ const {
 } = require("../utils/s3Upload");
 const Perplexity = require("@perplexity-ai/perplexity_ai");
 const fs = require("fs");
+const { tryParseJson, stripCodeFences } = require("../utils/helpers");
 
 const router = express.Router();
 const perplexity = new Perplexity();
@@ -203,18 +204,19 @@ Thesis: ${latestThesis ? latestThesis.content : "No firm thesis available."}`,
     const analysisText = completion.choices[0].message.content;
 
     // Try to parse JSON response, fallback to structured text if needed
+    const parsed = tryParseJson(analysisText);
     let analysis;
-    try {
-      // analysis = JSON.parse(analysisText);
-      analysis = analysisText;
-    } catch (parseError) {
+    if (parsed && typeof parsed === "object") {
+      analysis = parsed;
+    } else {
       // If JSON parsing fails, create structured analysis from text
+      const text = stripCodeFences(analysisText) || "";
       analysis = {
-        summary: analysisText.substring(0, 500),
-        keyPoints: analysisText
+        summary: text.substring(0, 500),
+        keyPoints: text
           .split("\n")
           .filter((line) => line.trim().startsWith("-"))
-          .map((line) => line.replace(/^-\s*/, "")),
+          .map((line) => line.replace(/^ -?\s*/, "")),
         marketSize: "Analysis available in summary",
         businessModel: "Analysis available in summary",
         competitiveAdvantage: "Analysis available in summary",
@@ -262,10 +264,11 @@ Thesis: ${latestThesis ? latestThesis.content : "No firm thesis available."}`,
       {
         $set: {
           analysis: {
-            summary: analysis,
+            ...analysis,
             analysisDate: new Date(),
             aiModel: "sonar-pro",
           },
+          analysisRaw: analysisText,
           status: "COMPLETED",
           // originalFileUrl: fileUrl,
           // originalFileKey: fileKey,

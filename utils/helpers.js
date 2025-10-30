@@ -1,4 +1,5 @@
 const jwt = require("jsonwebtoken");
+const mongoose = require("mongoose");
 
 // Generate JWT token
 const generateToken = (userId, role) => {
@@ -66,6 +67,103 @@ const generateRandomString = (length = 8) => {
   return result;
 };
 
+// Strip ```json ... ``` or ``` ... ``` fences
+const stripCodeFences = (text) => {
+  if (!text || typeof text !== "string") return text;
+  const fenceRe = /^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$/i;
+  const m = text.match(fenceRe);
+  return m ? m[1] : text;
+};
+
+// Safe JSON parse after cleaning
+const tryParseJson = (text) => {
+  if (!text) return null;
+  const cleaned = stripCodeFences(String(text)).trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    return null;
+  }
+};
+
+// Normalize thesis profile object into expected shape
+const toThesisProfile = (obj) => {
+  if (!obj || typeof obj !== "object") return null;
+  const pick = (v, def = null) => (v === undefined ? def : v);
+  const known = new Set([
+    "firmSummary",
+    "investmentObjectives",
+    "targetSectors",
+    "stages",
+    "geographies",
+    "checkSize",
+    "ownershipTargets",
+    "timeHorizon",
+    "returnTargets",
+    "riskTolerance",
+    "constraints",
+    "exclusions",
+    "esgPolicy",
+    "diligenceFramework",
+    "sourcingStrategy",
+    "portfolioConstruction",
+    "governancePreferences",
+    "valueCreationPlan",
+    "decisionProcess",
+    "exampleDeals",
+    "openQuestions",
+    "confidenceScore",
+  ]);
+
+  const profile = {
+    firmSummary: pick(obj.firmSummary, null),
+    investmentObjectives: pick(obj.investmentObjectives, null),
+    targetSectors: Array.isArray(obj.targetSectors) ? obj.targetSectors : [],
+    stages: Array.isArray(obj.stages) ? obj.stages : [],
+    geographies: Array.isArray(obj.geographies) ? obj.geographies : [],
+    checkSize: {
+      min: obj?.checkSize?.min ?? null,
+      max: obj?.checkSize?.max ?? null,
+      currency: obj?.checkSize?.currency ?? null,
+    },
+    ownershipTargets: pick(obj.ownershipTargets, null),
+    timeHorizon: pick(obj.timeHorizon, null),
+    returnTargets: pick(obj.returnTargets, null),
+    riskTolerance: pick(obj.riskTolerance, null),
+    constraints: Array.isArray(obj.constraints) ? obj.constraints : [],
+    exclusions: Array.isArray(obj.exclusions) ? obj.exclusions : [],
+    esgPolicy: pick(obj.esgPolicy, null),
+    diligenceFramework: {
+      criteria: Array.isArray(obj?.diligenceFramework?.criteria)
+        ? obj.diligenceFramework.criteria
+        : [],
+      redFlags: Array.isArray(obj?.diligenceFramework?.redFlags)
+        ? obj.diligenceFramework.redFlags
+        : [],
+    },
+    sourcingStrategy: Array.isArray(obj.sourcingStrategy)
+      ? obj.sourcingStrategy
+      : [],
+    portfolioConstruction: pick(obj.portfolioConstruction, null),
+    governancePreferences: pick(obj.governancePreferences, null),
+    valueCreationPlan: pick(obj.valueCreationPlan, null),
+    decisionProcess: pick(obj.decisionProcess, null),
+    exampleDeals: Array.isArray(obj.exampleDeals) ? obj.exampleDeals : [],
+    openQuestions: Array.isArray(obj.openQuestions) ? obj.openQuestions : [],
+    confidenceScore:
+      typeof obj.confidenceScore === "number" ? obj.confidenceScore : null,
+  };
+
+  // capture extras
+  const extras = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (!known.has(k)) extras[k] = v;
+  }
+  if (Object.keys(extras).length > 0) profile.extras = extras;
+
+  return profile;
+};
+
 module.exports = {
   generateToken,
   verifyToken,
@@ -74,4 +172,7 @@ module.exports = {
   validateFileType,
   formatFileSize,
   generateRandomString,
+  stripCodeFences,
+  tryParseJson,
+  toThesisProfile,
 };

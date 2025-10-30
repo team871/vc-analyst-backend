@@ -47,6 +47,8 @@ const pitchDeckSchema = new mongoose.Schema(
         default: "sonar-pro",
       },
     },
+    // Raw AI output (optional)
+    analysisRaw: { type: String },
     status: {
       type: String,
       enum: ["UPLOADED", "ANALYZING", "COMPLETED", "FAILED"],
