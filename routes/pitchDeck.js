@@ -210,7 +210,7 @@ ${
     const completion = await callPerplexityWithRetry(3);
 
     const analysisText = completion.choices[0].message.content;
-
+    console.log(analysisText);
     // Try to parse JSON response, fallback to structured text if needed
     const parsed = tryParseJson(analysisText);
     let analysis;
