@@ -9,7 +9,6 @@ const thesisSchema = new mongoose.Schema(
     },
     content: {
       type: String,
-      required: true,
     },
     // Parsed structured profile from AI
     profile: {

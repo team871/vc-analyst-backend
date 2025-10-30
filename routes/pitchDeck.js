@@ -168,7 +168,15 @@ Return this JSON structure:
 }
 
 Keep tone professional, clear, and investor-grade. Output valid JSON only.
-Thesis: ${latestThesis ? latestThesis.content : "No firm thesis available."}`,
+
+Firm thesis (JSON below). Use it strictly to assess fit; do not alter it.
+${
+  latestThesis && latestThesis.profile
+    ? JSON.stringify(latestThesis.profile)
+    : latestThesis && latestThesis.content
+    ? String(latestThesis.content)
+    : "No firm thesis available."
+}`,
                   },
 
                   {

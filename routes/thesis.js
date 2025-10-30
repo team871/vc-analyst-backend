@@ -125,7 +125,8 @@ Keep tone professional, clear, and investor-grade. Output valid JSON only.`,
       // Create thesis record (no file storage)
       const thesis = new Thesis({
         title,
-        content: aiContent,
+        // Store structured JSON string in content if profile exists, else the raw AI text
+        content: profile ? JSON.stringify(profile) : aiContent,
         rawContent: aiContent,
         profile: profile || undefined,
         originalPdfUrl: "",
@@ -312,7 +313,7 @@ Keep tone professional, clear, and investor-grade. Output valid JSON only.`,
           const aiText = completion.choices[0].message.content;
           const parsed = tryParseJson(aiText);
           const profile = toThesisProfile(parsed);
-          updateData.content = aiText;
+          updateData.content = profile ? JSON.stringify(profile) : aiText;
           updateData.rawContent = aiText;
           if (profile) updateData.profile = profile;
         } catch (aiError) {
