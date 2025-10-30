@@ -36,11 +36,14 @@ const pitchDeckSchema = new mongoose.Schema(
       businessModel: String,
       competitiveAdvantage: String,
       team: String,
-      financials: String,
+      // Can be an object (parsed) or string (fallback)
+      financials: mongoose.Schema.Types.Mixed,
       risks: [String],
       opportunities: [String],
       recommendation: String,
       confidenceScore: Number,
+      // Fit assessment from thesis comparison
+      fitAssessment: mongoose.Schema.Types.Mixed,
       analysisDate: Date,
       aiModel: {
         type: String,
