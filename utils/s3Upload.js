@@ -48,12 +48,38 @@ const generateFileKey = (originalName, organizationId, type) => {
 };
 
 // Upload file to S3
-const uploadToS3 = async (file, key) => {
+// Accepts either: {buffer, mimetype} or (buffer, mimetype) or just buffer
+const uploadToS3 = async (fileOrBuffer, key, contentType = null) => {
+  let buffer;
+  let mimetype;
+
+  // Handle different input formats
+  if (Buffer.isBuffer(fileOrBuffer)) {
+    // Direct buffer passed
+    buffer = fileOrBuffer;
+    mimetype = contentType || "application/octet-stream";
+  } else if (fileOrBuffer && fileOrBuffer.buffer) {
+    // File object passed (from multer)
+    buffer = fileOrBuffer.buffer;
+    mimetype =
+      fileOrBuffer.mimetype || contentType || "application/octet-stream";
+  } else {
+    throw new Error("Invalid file input: expected Buffer or file object");
+  }
+
+  // Convert ArrayBuffer to Buffer if needed
+  if (buffer instanceof ArrayBuffer) {
+    buffer = Buffer.from(buffer);
+  } else if (!Buffer.isBuffer(buffer)) {
+    // Convert Uint8Array or other typed arrays to Buffer
+    buffer = Buffer.from(buffer);
+  }
+
   const params = {
     Bucket: process.env.S3_BUCKET_NAME,
     Key: key,
-    Body: file.buffer,
-    ContentType: file.mimetype,
+    Body: buffer,
+    ContentType: mimetype,
     ACL: "private", // Private access
   };
 

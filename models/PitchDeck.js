@@ -42,6 +42,8 @@ const pitchDeckSchema = new mongoose.Schema(
       opportunities: [String],
       recommendation: String,
       confidenceScore: Number,
+      // Sector analysis with internet-sourced information
+      sectorAnalysis: mongoose.Schema.Types.Mixed,
       // Fit assessment from thesis comparison
       fitAssessment: mongoose.Schema.Types.Mixed,
       analysisDate: Date,
@@ -52,6 +54,24 @@ const pitchDeckSchema = new mongoose.Schema(
     },
     // Raw AI output (optional)
     analysisRaw: { type: String },
+    // Track analysis version for iterative improvements
+    analysisVersion: {
+      type: Number,
+      default: 1,
+    },
+    // Store history of analyses
+    analysisHistory: [
+      {
+        version: Number,
+        analysis: mongoose.Schema.Types.Mixed,
+        analysisRaw: String,
+        analysisDate: Date,
+        trigger: {
+          type: String,
+          enum: ["initial", "user_question", "supporting_doc", "updated_deck"],
+        },
+      },
+    ],
     status: {
       type: String,
       enum: ["UPLOADED", "ANALYZING", "COMPLETED", "FAILED"],

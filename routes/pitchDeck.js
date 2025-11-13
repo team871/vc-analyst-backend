@@ -3,6 +3,8 @@ const { body, validationResult } = require("express-validator");
 const PitchDeck = require("../models/PitchDeck");
 const Thesis = require("../models/Thesis");
 const Comment = require("../models/Comment");
+const PitchDeckMessage = require("../models/PitchDeckMessage");
+const SupportingDocument = require("../models/SupportingDocument");
 const { authMiddleware, requireSAOrAnalyst } = require("../middleware/auth");
 const {
   upload,
@@ -125,7 +127,9 @@ Input: A pitch deck (PDF) and optional analyst comments.
 Output: A single JSON object — concise, factual, and well-structured.
 
 Rules:
-• Extract insights only from the pitch deck — no external data or assumptions.
+• Extract insights only from the pitch deck — no external data or assumptions (EXCEPT for sectorAnalysis).
+• For the "sectorAnalysis" section ONLY: You MUST use internet search to find current market trends, recent news, competitor updates, and relevant sector information. Include proper sources with URLs.
+• For all other sections: Base your analysis strictly on the pitch deck content provided.
 • If information is missing, mark as "unknown" and briefly note what's missing.
 • Be objective, evidence-based, and avoid speculation or hype.
 • Summaries must be concise yet capture key strategic and financial details.
@@ -148,6 +152,21 @@ Return this JSON structure:
   "opportunities": ["List 3-5 growth opportunities or strengths."],
   "recommendation": "One of: 'Pass', 'Request More Info', 'Schedule Meeting', or 'Proceed to Diligence'. Include 1-line rationale.",
   "confidenceScore": 1-10,
+
+  "sectorAnalysis": {
+    "marketTrends": "Current trends in the sector/industry relevant to this startup (e.g., adoption rates, regulatory changes, technological shifts). Source information from the internet.",
+    "recentNews": ["List of 3-5 recent news items or developments in the sector with brief descriptions."],
+    "competitorNews": ["Any recent news or updates about competitors mentioned in the deck or known in the space."],
+    "relevantInsights": "Other important market context, investor sentiment, or industry dynamics that could impact this opportunity.",
+    "sources": [
+      {
+        "title": "Article or source title",
+        "url": "https://example.com/article",
+        "date": "Publication date if available",
+        "summary": "Brief summary of key information from this source"
+      }
+    ]
+  },
 
   "fitAssessment": {
     "overallFit": "STRONG | PARTIAL | WEAK",
@@ -234,6 +253,13 @@ ${
         opportunities: ["See detailed analysis"],
         recommendation: "See detailed analysis",
         confidenceScore: 7,
+        sectorAnalysis: {
+          marketTrends: "Analysis not available due to parsing error",
+          recentNews: [],
+          competitorNews: [],
+          relevantInsights: "Analysis not available due to parsing error",
+          sources: [],
+        },
         fitAssessment: {
           overallFit: latestThesis ? "PARTIAL" : "UNKNOWN",
           rationale: latestThesis
@@ -259,12 +285,26 @@ ${
     const analysisDuration = endTime - startTime;
 
     // Upload file to S3 after successful analysis
-    // const fileKey = generateFileKey(
-    //   fileName,
-    //   pdRecord.organization,
-    //   "pitch-decks"
-    // );
-    // const fileUrl = await uploadToS3(fileBuffer, fileKey);
+    const fileKey = generateFileKey(
+      fileName,
+      pdRecord.organization,
+      "pitch-decks"
+    );
+    // fileBuffer is actually req.file object with buffer and mimetype
+    const fileUrl = await uploadToS3(fileBuffer, fileKey);
+
+    // Save to analysis history
+    const analysisRecord = {
+      version: 1,
+      analysis: {
+        ...analysis,
+        analysisDate: new Date(),
+        aiModel: "sonar-pro",
+      },
+      analysisRaw: analysisText,
+      analysisDate: new Date(),
+      trigger: "initial",
+    };
 
     // Update pitch deck with analysis and S3 URLs
     const updatedPitchDeck = await PitchDeck.findOneAndUpdate(
@@ -277,14 +317,35 @@ ${
             aiModel: "sonar-pro",
           },
           analysisRaw: analysisText,
+          analysisVersion: 1,
           status: "COMPLETED",
-          // originalFileUrl: fileUrl,
-          // originalFileKey: fileKey,
+          originalFileUrl: fileUrl,
+          originalFileKey: fileKey,
           "metadata.analysisDuration": analysisDuration,
+        },
+        $push: {
+          analysisHistory: analysisRecord,
         },
       },
       { new: true }
     );
+
+    // Create initial message with analysis (special case: no user query for initial analysis)
+    await PitchDeckMessage.create({
+      pitchDeck: pitchDeckId,
+      author: pdRecord.uploadedBy,
+      organization: pdRecord.organization,
+      userQuery: "[Initial pitch deck upload]",
+      attachments: [],
+      aiResponse: analysis,
+      responseType: "initial",
+      requiresAnalysisUpdate: true,
+      analysisVersion: 1,
+      metadata: {
+        processingTime: analysisDuration,
+        model: "sonar-pro",
+      },
+    });
 
     console.log(
       `Pitch deck ${pitchDeckId} analysis completed in ${analysisDuration}ms`
@@ -307,6 +368,13 @@ ${
         opportunities: ["Analysis failed"],
         recommendation: "Analysis failed",
         confidenceScore: 0,
+        sectorAnalysis: {
+          marketTrends: "Analysis failed",
+          recentNews: [],
+          competitorNews: [],
+          relevantInsights: "Analysis failed",
+          sources: [],
+        },
         analysisDate: new Date(),
         aiModel: "sonar-pro",
       },
@@ -361,13 +429,16 @@ router.get("/:id", authMiddleware, requireSAOrAnalyst, async (req, res) => {
       return res.status(404).json({ message: "Pitch deck not found" });
     }
 
-    // Generate signed URL for file access
-    // const fileUrl = await generateSignedUrl(pitchDeck.originalFileKey);
+    // Generate signed URL for file access (valid for limited time)
+    let signedFileUrl = pitchDeck.originalFileUrl;
+    if (pitchDeck.originalFileKey) {
+      signedFileUrl = await generateSignedUrl(pitchDeck.originalFileKey);
+    }
 
     res.json({
       pitchDeck: {
         ...pitchDeck.toObject(),
-        // originalFileUrl: fileUrl,
+        originalFileUrl: signedFileUrl,
       },
     });
   } catch (error) {
@@ -504,5 +575,536 @@ router.delete("/:id", authMiddleware, requireSAOrAnalyst, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
+// ====================================================================================
+// CONVERSATIONAL ANALYSIS ENDPOINTS
+// ====================================================================================
+
+// Get conversation history for pitch deck
+router.get(
+  "/:id/chat",
+  authMiddleware,
+  requireSAOrAnalyst,
+  async (req, res) => {
+    try {
+      const query = {
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query);
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      // Get all messages in the chat
+      const messages = await PitchDeckMessage.find({
+        pitchDeck: pitchDeck._id,
+        isActive: true,
+      })
+        .populate("author", "firstName lastName email")
+        .sort({ createdAt: 1 });
+
+      // Get supporting documents
+      const supportingDocs = await SupportingDocument.find({
+        pitchDeck: pitchDeck._id,
+        isActive: true,
+      })
+        .populate("uploadedBy", "firstName lastName email")
+        .sort({ createdAt: -1 });
+
+      // Generate signed URLs for supporting documents
+      const supportingDocsWithSignedUrls = await Promise.all(
+        supportingDocs.map(async (doc) => {
+          let signedUrl = doc.fileUrl;
+          if (doc.fileKey) {
+            signedUrl = await generateSignedUrl(doc.fileKey);
+          }
+          return {
+            ...doc.toObject(),
+            fileUrl: signedUrl,
+          };
+        })
+      );
+
+      // Transform messages and generate signed URLs for attachments
+      const formattedMessages = await Promise.all(
+        messages.map(async (msg) => {
+          // Generate signed URLs for message attachments
+          const attachmentsWithSignedUrls = await Promise.all(
+            (msg.attachments || []).map(async (att) => {
+              let signedUrl = att.fileUrl;
+              if (att.fileKey) {
+                signedUrl = await generateSignedUrl(att.fileKey);
+              }
+              return {
+                ...att,
+                fileUrl: signedUrl,
+              };
+            })
+          );
+
+          return {
+            _id: msg._id,
+            userQuery: msg.userQuery,
+            aiResponse: msg.aiResponse,
+            responseType: msg.responseType,
+            requiresAnalysisUpdate: msg.requiresAnalysisUpdate,
+            attachments: attachmentsWithSignedUrls,
+            analysisVersion: msg.analysisVersion,
+            author: msg.author,
+            createdAt: msg.createdAt,
+            metadata: msg.metadata,
+          };
+        })
+      );
+
+      res.json({
+        conversationHistory: formattedMessages,
+        supportingDocuments: supportingDocsWithSignedUrls,
+        currentVersion: pitchDeck.analysisVersion,
+        status: pitchDeck.status,
+      });
+    } catch (error) {
+      console.error("Get chat history error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+// Unified chat endpoint - send messages and/or attach files, get AI response
+router.post(
+  "/:id/chat",
+  authMiddleware,
+  requireSAOrAnalyst,
+  upload.array("attachments", 5), // Support up to 5 attachments
+  async (req, res) => {
+    try {
+      const { message } = req.body;
+      const attachments = req.files || [];
+
+      // Must have either a message or attachments
+      if (!message && attachments.length === 0) {
+        return res.status(400).json({
+          message: "Please provide a message or attach files",
+        });
+      }
+
+      const query = {
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query);
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      // Update status to analyzing
+      await PitchDeck.findByIdAndUpdate(pitchDeck._id, {
+        status: "ANALYZING",
+      });
+
+      // 1. Process and save supporting documents (if any)
+      const savedAttachments = [];
+      for (const file of attachments) {
+        const encodedFile = file.buffer.toString("base64");
+
+        // Upload to S3
+        const fileKey = generateFileKey(
+          file.originalname,
+          req.user.organization._id,
+          "supporting-docs"
+        );
+        const fileUrl = await uploadToS3(file.buffer, fileKey, file.mimetype);
+
+        const supportingDoc = await SupportingDocument.create({
+          pitchDeck: pitchDeck._id,
+          title: file.originalname,
+          description: `Attached by ${req.user.firstName} ${req.user.lastName}`,
+          fileUrl: fileUrl,
+          fileKey: fileKey,
+          uploadedBy: req.user._id,
+          organization: req.user.organization._id,
+          metadata: {
+            fileSize: file.size,
+            fileType: file.mimetype,
+            uploadDate: new Date(),
+          },
+        });
+
+        savedAttachments.push({
+          doc: supportingDoc,
+          encodedFile,
+          fileName: file.originalname,
+        });
+      }
+
+      // 2. Get conversation history (BEFORE creating new message)
+      const allMessages = await PitchDeckMessage.find({
+        pitchDeck: pitchDeck._id,
+        isActive: true,
+      })
+        .populate("author", "firstName lastName email")
+        .sort({ createdAt: 1 });
+
+      const allSupportingDocs = await SupportingDocument.find({
+        pitchDeck: pitchDeck._id,
+        isActive: true,
+      });
+
+      // 3. Process with AI to get response
+      const result = await reanalyzeWithContext(
+        pitchDeck._id,
+        allMessages,
+        allSupportingDocs,
+        savedAttachments,
+        message || "[Attached files]"
+      );
+
+      // 4. Save ONE document with both query and response
+      const attachmentRefs = savedAttachments.map((att) => ({
+        fileName: att.fileName,
+        fileType: att.doc.metadata.fileType,
+        fileSize: att.doc.metadata.fileSize,
+        fileUrl: att.doc.fileUrl,
+        fileKey: att.doc.fileKey,
+      }));
+
+      const conversationTurn = await PitchDeckMessage.create({
+        pitchDeck: pitchDeck._id,
+        author: req.user._id,
+        organization: req.user.organization._id,
+        userQuery: message || "[Attached files]",
+        attachments: attachmentRefs,
+        aiResponse: result.aiResponse,
+        responseType: result.responseType,
+        requiresAnalysisUpdate: result.requiresAnalysisUpdate,
+        analysisVersion: result.analysisVersion,
+        metadata: {
+          processingTime: result.processingTime,
+          model: "sonar-pro",
+        },
+      });
+
+      await conversationTurn.populate("author", "firstName lastName email");
+
+      // 5. Build response
+      const response = {
+        conversationTurn,
+        userQuery: conversationTurn.userQuery,
+        aiResponse: conversationTurn.aiResponse,
+        responseType: result.responseType,
+        requiresAnalysisUpdate: result.requiresAnalysisUpdate,
+        version: result.analysisVersion,
+        status: "completed",
+      };
+
+      // Include structured data based on response type
+      if (result.responseType === "conversational") {
+        response.conversationalResponse = result.aiResponse.response;
+        response.rationale = result.aiResponse.rationale;
+      } else if (result.responseType === "full_analysis") {
+        response.analysis = result.analysis;
+        response.rationale = result.aiResponse.rationale;
+      }
+
+      res.json(response);
+    } catch (error) {
+      console.error("Chat error:", error);
+      await PitchDeck.findByIdAndUpdate(req.params.id, {
+        status: "FAILED",
+      });
+      res.status(500).json({
+        message: "Server error during analysis",
+        error: error.message,
+      });
+    }
+  }
+);
+
+// Re-analysis function with conversation context
+async function reanalyzeWithContext(
+  pitchDeckId,
+  allMessages,
+  allSupportingDocs,
+  newAttachments = [],
+  currentUserMessage = ""
+) {
+  try {
+    const pitchDeck = await PitchDeck.findById(pitchDeckId).lean();
+    const latestThesis = await Thesis.findOne({
+      organization: pitchDeck.organization,
+      isActive: true,
+    })
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    const startTime = Date.now();
+    const newVersion = pitchDeck.analysisVersion + 1;
+
+    // Get the current analysis for reference
+    const currentAnalysis = pitchDeck.analysis || {};
+    const currentAnalysisJson = JSON.stringify(currentAnalysis, null, 2);
+
+    // Build conversation context from messages (now with userQuery/aiResponse structure)
+    const conversationContext = allMessages
+      .map((msg) => {
+        const author = msg.author
+          ? `${msg.author.firstName} ${msg.author.lastName}`
+          : "Analyst";
+        const attachments =
+          msg.attachments && msg.attachments.length > 0
+            ? ` [Attachments: ${msg.attachments
+                .map((a) => a.fileName)
+                .join(", ")}]`
+            : "";
+
+        // Format: User query followed by AI response
+        const userPart = `${author}: ${msg.userQuery}${attachments}`;
+        const aiPart = msg.aiResponse
+          ? `AI Assistant: ${
+              typeof msg.aiResponse === "string"
+                ? msg.aiResponse
+                : JSON.stringify(msg.aiResponse)
+            }`
+          : "";
+
+        return `${userPart}\n${aiPart}`;
+      })
+      .join("\n\n");
+
+    // Build supporting docs context
+    const supportingDocsContext =
+      allSupportingDocs.length > 0
+        ? `\n\nSupporting Documents Available:\n${allSupportingDocs
+            .map(
+              (doc) => `- ${doc.title}: ${doc.description || "No description"}`
+            )
+            .join("\n")}`
+        : "";
+
+    // Determine if this requires full re-analysis or just a conversational answer
+    const hasAttachments = newAttachments.length > 0;
+    const userMessageContent = currentUserMessage;
+
+    // Build enhanced prompt with conversation history
+    const enhancedPrompt = `You are DealFlow AI — an AI assistant for Venture Capital analysts.
+
+This is a FOLLOW-UP interaction. The analyst has asked a question or provided new information.
+
+CURRENT ANALYSIS (Version ${pitchDeck.analysisVersion}):
+This is the baseline analysis from the pitch deck. Use this as your reference when answering questions.
+${currentAnalysisJson}
+
+CONVERSATION HISTORY:
+${conversationContext}
+${supportingDocsContext}
+
+IMPORTANT - Response Type Instructions:
+You must first determine the appropriate response type:
+
+1. **CONVERSATIONAL** - Use when:
+   - Analyst asks a specific question about existing analysis
+   - Analyst wants clarification or elaboration
+   - No new data/files are provided
+   - Examples: "What's the CAC?", "Can you elaborate on the team?", "What are the risks?"
+
+2. **FULL_ANALYSIS** - Use when:
+   - New files/documents are attached
+   - Analyst explicitly requests re-analysis or update
+   - Analyst provides significant new information that changes the evaluation
+   - Examples: "Update the analysis", "Reanalyze with this new data", "Here are the financials, update projections"
+
+Your response MUST be a JSON object with this structure:
+
+{
+  "responseType": "conversational" | "full_analysis",
+  "requiresAnalysisUpdate": true | false,
+  "rationale": "Brief explanation of why you chose this response type",
+  "response": {
+    // IF responseType is "conversational":
+    "answer": "Direct, concise answer to the analyst's question (2-4 sentences)",
+    "reference": "Which part of the analysis this relates to (e.g., 'financials.unitEconomics')",
+    "suggestedFollowUp": ["Optional: 1-2 follow-up questions the analyst might want to ask"]
+    
+    // IF responseType is "full_analysis":
+    // Include the FULL structured analysis (summary, keyPoints, marketSize, businessModel, etc.)
+  }
+}
+
+Rules:
+• Default to "conversational" unless there's clear reason for full re-analysis
+• For "conversational", give direct answers - don't repeat the entire analysis
+• For "full_analysis", use internet search for sectorAnalysis section
+• Be objective, evidence-based, and avoid speculation
+• If uncertain, choose "conversational" and offer to do full re-analysis if needed
+
+Current analyst message: "${userMessageContent}"
+New files attached: ${hasAttachments ? "Yes" : "No"}
+
+Firm thesis (for fit assessment - only needed for full_analysis):
+${
+  latestThesis && latestThesis.profile
+    ? JSON.stringify(latestThesis.profile)
+    : latestThesis && latestThesis.content
+    ? String(latestThesis.content)
+    : "No firm thesis available."
+}`;
+
+    // Build message content array (text + any new file attachments)
+    const messageContent = [
+      {
+        type: "text",
+        text: enhancedPrompt,
+      },
+    ];
+
+    // Add any newly attached files to the AI message
+    for (const attachment of newAttachments) {
+      messageContent.push({
+        type: "file_url",
+        file_url: {
+          url: attachment.encodedFile,
+        },
+        file_name: attachment.fileName,
+      });
+    }
+
+    // Call Perplexity with updated context
+    const completion = await perplexity.chat.completions.create({
+      model: "sonar-pro",
+      messages: [
+        {
+          role: "user",
+          content: messageContent,
+        },
+      ],
+    });
+
+    const analysisText = completion.choices[0].message.content;
+
+    const parsed = tryParseJson(analysisText);
+    const endTime = Date.now();
+    const analysisDuration = endTime - startTime;
+
+    let aiResponse = {};
+    let responseType = "conversational";
+    let requiresAnalysisUpdate = false;
+
+    // Parse the AI response to determine type
+    if (parsed && typeof parsed === "object" && parsed.responseType) {
+      responseType = parsed.responseType;
+      requiresAnalysisUpdate = parsed.requiresAnalysisUpdate || false;
+      aiResponse = parsed;
+    } else {
+      // Fallback: if parsing fails or old format, treat as conversational
+      const text = stripCodeFences(analysisText) || "";
+      aiResponse = {
+        responseType: "conversational",
+        requiresAnalysisUpdate: false,
+        rationale: "Parsing fallback - treating as conversational response",
+        response: {
+          // answer: text.substring(0, 500),
+          answer: text,
+          reference: "general",
+          suggestedFollowUp: [],
+        },
+      };
+    }
+
+    // Determine actual version increment
+    const shouldIncrementVersion =
+      requiresAnalysisUpdate && responseType === "full_analysis";
+    const actualVersion = shouldIncrementVersion
+      ? newVersion
+      : pitchDeck.analysisVersion;
+
+    let updatedPitchDeck = pitchDeck;
+
+    // Only update the main analysis if it's a full_analysis request
+    if (shouldIncrementVersion) {
+      const fullAnalysis = aiResponse.response;
+
+      // Save to history
+      const analysisRecord = {
+        version: actualVersion,
+        analysis: {
+          ...fullAnalysis,
+          analysisDate: new Date(),
+          aiModel: "sonar-pro",
+        },
+        analysisRaw: analysisText,
+        analysisDate: new Date(),
+        trigger: hasAttachments ? "supporting_doc" : "user_question",
+      };
+
+      // Update pitch deck with new analysis
+      updatedPitchDeck = await PitchDeck.findByIdAndUpdate(
+        pitchDeckId,
+        {
+          $set: {
+            analysis: {
+              ...fullAnalysis,
+              analysisDate: new Date(),
+              aiModel: "sonar-pro",
+            },
+            analysisRaw: analysisText,
+            analysisVersion: actualVersion,
+            status: "COMPLETED",
+          },
+          $push: {
+            analysisHistory: analysisRecord,
+          },
+        },
+        { new: true }
+      );
+
+      console.log(
+        `Pitch deck ${pitchDeckId} FULL RE-ANALYSIS (v${actualVersion}) in ${analysisDuration}ms`
+      );
+    } else {
+      // Just conversational - update status but don't change analysis
+      updatedPitchDeck = await PitchDeck.findByIdAndUpdate(
+        pitchDeckId,
+        {
+          $set: {
+            status: "COMPLETED",
+          },
+        },
+        { new: true }
+      );
+
+      console.log(
+        `Pitch deck ${pitchDeckId} CONVERSATIONAL response (v${actualVersion}) in ${analysisDuration}ms`
+      );
+    }
+
+    // Return all the data (message will be saved by the calling function)
+    return {
+      ...updatedPitchDeck.toObject(),
+      aiResponse,
+      responseType,
+      requiresAnalysisUpdate,
+      processingTime: analysisDuration,
+    };
+  } catch (error) {
+    console.error("Re-analysis error:", error);
+    await PitchDeck.findByIdAndUpdate(pitchDeckId, {
+      status: "FAILED",
+    });
+    throw error;
+  }
+}
 
 module.exports = router;
