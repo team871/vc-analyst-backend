@@ -229,7 +229,7 @@ ${
     const completion = await callPerplexityWithRetry(3);
 
     const analysisText = completion.choices[0].message.content;
-    console.log(analysisText);
+
     // Try to parse JSON response, fallback to structured text if needed
     const parsed = tryParseJson(analysisText);
     let analysis;
@@ -833,6 +833,101 @@ router.post(
   }
 );
 
+// Helper function to apply edits to analysis object
+function applyEditsToAnalysis(analysis, edits) {
+  if (!edits || !Array.isArray(edits) || edits.length === 0) {
+    return analysis;
+  }
+
+  // Create a deep copy to avoid mutating the original
+  const updatedAnalysis = JSON.parse(JSON.stringify(analysis));
+
+  for (const edit of edits) {
+    const { path, newValue } = edit;
+    if (!path || newValue === undefined) {
+      console.warn(`Invalid edit: missing path or newValue`, edit);
+      continue;
+    }
+
+    try {
+      // Handle array indices like "keyPoints[0]" or "risks[1]" or nested "financials.items[0]"
+      const arrayMatch = path.match(/^(.+)\[(\d+)\]$/);
+      if (arrayMatch) {
+        const [, arrayPath, indexStr] = arrayMatch;
+        const index = parseInt(indexStr, 10);
+        const array = getNestedValue(updatedAnalysis, arrayPath);
+        if (Array.isArray(array) && index >= 0 && index < array.length) {
+          array[index] = newValue;
+        } else if (Array.isArray(array) && index === array.length) {
+          // Allow appending to array if index equals length
+          array.push(newValue);
+        } else {
+          console.warn(
+            `Invalid array path or index: ${path} (array length: ${
+              Array.isArray(array) ? array.length : "not an array"
+            })`
+          );
+        }
+      } else {
+        // Handle nested paths like "financials.traction" or simple paths like "summary"
+        try {
+          setNestedValue(updatedAnalysis, path, newValue);
+        } catch (error) {
+          console.warn(`Cannot apply edit to path ${path}: ${error.message}`);
+        }
+      }
+    } catch (error) {
+      console.error(`Error applying edit to path ${path}:`, error);
+    }
+  }
+
+  return updatedAnalysis;
+}
+
+// Helper to get nested value from object
+function getNestedValue(obj, path) {
+  const keys = path.split(".");
+  let current = obj;
+  for (const key of keys) {
+    if (current && typeof current === "object" && key in current) {
+      current = current[key];
+    } else {
+      return undefined;
+    }
+  }
+  return current;
+}
+
+// Helper to set nested value in object
+function setNestedValue(obj, path, value) {
+  const keys = path.split(".");
+  let current = obj;
+
+  // Navigate to the parent of the target key
+  for (let i = 0; i < keys.length - 1; i++) {
+    const key = keys[i];
+    if (
+      !(key in current) ||
+      typeof current[key] !== "object" ||
+      current[key] === null
+    ) {
+      // Path doesn't exist - create it for nested paths, but warn for top-level
+      if (i === 0) {
+        throw new Error(`Path "${path}" does not exist in analysis object`);
+      }
+      current[key] = {};
+    }
+    current = current[key];
+  }
+
+  // Set the final value
+  const finalKey = keys[keys.length - 1];
+  if (!(finalKey in current)) {
+    throw new Error(`Path "${path}" does not exist in analysis object`);
+  }
+  current[finalKey] = value;
+}
+
 // Re-analysis function with conversation context
 async function reanalyzeWithContext(
   pitchDeckId,
@@ -920,7 +1015,13 @@ You must first determine the appropriate response type:
    - No new data/files are provided
    - Examples: "What's the CAC?", "Can you elaborate on the team?", "What are the risks?"
 
-2. **FULL_ANALYSIS** - Use when:
+2. **MINOR_EDIT** - Use when:
+   - Analyst requests minor corrections (spelling, typos, small factual updates)
+   - Analyst asks to fix specific text without requiring full re-analysis
+   - Changes are localized to specific fields (e.g., "Fix the typo in the summary", "Update the company name to 'Acme Corp'")
+   - Examples: "Fix spelling in summary", "Change 'startup' to 'company' in keyPoints", "Correct the revenue number to $5M"
+
+3. **FULL_ANALYSIS** - Use when:
    - New files/documents are attached
    - Analyst explicitly requests re-analysis or update
    - Analyst provides significant new information that changes the evaluation
@@ -929,7 +1030,7 @@ You must first determine the appropriate response type:
 Your response MUST be a JSON object with this structure:
 
 {
-  "responseType": "conversational" | "full_analysis",
+  "responseType": "conversational" | "minor_edit" | "full_analysis",
   "requiresAnalysisUpdate": true | false,
   "rationale": "Brief explanation of why you chose this response type",
   "response": {
@@ -938,14 +1039,25 @@ Your response MUST be a JSON object with this structure:
     "reference": "Which part of the analysis this relates to (e.g., 'financials.unitEconomics')",
     "suggestedFollowUp": ["Optional: 1-2 follow-up questions the analyst might want to ask"]
     
+    // IF responseType is "minor_edit":
+    "edits": [
+      {
+        "path": "summary" | "keyPoints[0]" | "marketSize" | "businessModel" | "competitiveAdvantage" | "team" | "financials.traction" | "financials.fundraising" | "financials.unitEconomics" | "risks[0]" | "opportunities[0]" | "recommendation" | etc.,
+        "oldValue": "The current value at this path",
+        "newValue": "The corrected/updated value"
+      }
+    ],
+    "confirmation": "Brief message confirming what edits were made (e.g., 'Fixed spelling errors in summary and keyPoints[2]')"
+    
     // IF responseType is "full_analysis":
     // Include the FULL structured analysis (summary, keyPoints, marketSize, businessModel, etc.)
   }
 }
 
 Rules:
-• Default to "conversational" unless there's clear reason for full re-analysis
+• Default to "conversational" unless there's clear reason for full re-analysis or minor edits
 • For "conversational", give direct answers - don't repeat the entire analysis
+• For "minor_edit", provide specific edits with exact paths and values - only edit what was requested
 • For "full_analysis", use internet search for sectorAnalysis section
 • Be objective, evidence-based, and avoid speculation
 • If uncertain, choose "conversational" and offer to do full re-analysis if needed
@@ -1024,15 +1136,16 @@ ${
     }
 
     // Determine actual version increment
-    const shouldIncrementVersion =
-      requiresAnalysisUpdate && responseType === "full_analysis";
+    const shouldIncrementVersion = responseType === "full_analysis";
+    // requiresAnalysisUpdate && responseType === "full_analysis";
+    const isMinorEdit = responseType === "minor_edit";
     const actualVersion = shouldIncrementVersion
       ? newVersion
       : pitchDeck.analysisVersion;
 
     let updatedPitchDeck = pitchDeck;
 
-    // Only update the main analysis if it's a full_analysis request
+    // Handle full analysis update
     if (shouldIncrementVersion) {
       const fullAnalysis = aiResponse.response;
 
@@ -1073,6 +1186,59 @@ ${
       console.log(
         `Pitch deck ${pitchDeckId} FULL RE-ANALYSIS (v${actualVersion}) in ${analysisDuration}ms`
       );
+    } else if (isMinorEdit) {
+      // Handle minor edits - apply edits to existing analysis
+      const edits = aiResponse.response?.edits || [];
+      if (edits.length > 0) {
+        const updatedAnalysis = applyEditsToAnalysis(currentAnalysis, edits);
+
+        // Update analysis date but keep same version (minor edits don't increment version)
+        updatedAnalysis.analysisDate = new Date();
+        updatedAnalysis.aiModel = updatedAnalysis.aiModel || "sonar-pro";
+
+        // Save to history with trigger "user_question" to indicate it was a minor edit
+        const analysisRecord = {
+          version: actualVersion,
+          analysis: updatedAnalysis,
+          analysisRaw: analysisText,
+          analysisDate: new Date(),
+          trigger: "user_question",
+        };
+
+        // Update pitch deck with edited analysis (same version)
+        updatedPitchDeck = await PitchDeck.findByIdAndUpdate(
+          pitchDeckId,
+          {
+            $set: {
+              analysis: updatedAnalysis,
+              status: "COMPLETED",
+            },
+            $push: {
+              analysisHistory: analysisRecord,
+            },
+          },
+          { new: true }
+        );
+
+        console.log(
+          `Pitch deck ${pitchDeckId} MINOR EDIT applied (${edits.length} edits, v${actualVersion}) in ${analysisDuration}ms`
+        );
+      } else {
+        // No valid edits provided - treat as conversational
+        updatedPitchDeck = await PitchDeck.findByIdAndUpdate(
+          pitchDeckId,
+          {
+            $set: {
+              status: "COMPLETED",
+            },
+          },
+          { new: true }
+        );
+
+        console.log(
+          `Pitch deck ${pitchDeckId} MINOR_EDIT requested but no valid edits found, treated as conversational (v${actualVersion}) in ${analysisDuration}ms`
+        );
+      }
     } else {
       // Just conversational - update status but don't change analysis
       updatedPitchDeck = await PitchDeck.findByIdAndUpdate(

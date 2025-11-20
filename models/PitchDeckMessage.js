@@ -42,7 +42,7 @@ const pitchDeckMessageSchema = new mongoose.Schema(
     // Response metadata
     responseType: {
       type: String,
-      enum: ["conversational", "full_analysis", "initial"],
+      enum: ["conversational", "full_analysis", "initial", "minor_edit"],
       required: true,
     },
     requiresAnalysisUpdate: {
