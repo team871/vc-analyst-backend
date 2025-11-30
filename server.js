@@ -1,4 +1,6 @@
 const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -9,13 +11,15 @@ const authRoutes = require("./routes/auth");
 const thesisRoutes = require("./routes/thesis.js");
 const pitchDeckRoutes = require("./routes/pitchDeck");
 const userRoutes = require("./routes/users.js");
+const liveConversationRoutes = require("./routes/liveConversation").router;
+const { websocketAuth } = require("./middleware/websocketAuth");
 
 const app = express();
 // Trust proxy (so req.secure and IPs work correctly behind Nginx)
 app.set("trust proxy", 1);
 
 // Security middleware
-app.use(helmet());
+// app.use(helmet());
 // CORS configuration: allow specific frontends and handle preflight
 const allowedOrigins = [
   "https://dealassist.alfawhocodes.com",
@@ -30,8 +34,16 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true); // Postman, curl, server-side
+    // Allow requests with no origin (like mobile apps, Postman, or file://)
+    if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
+    // In development, allow localhost with any port
+    if (
+      process.env.NODE_ENV === "development" &&
+      origin.startsWith("http://localhost:")
+    ) {
+      return callback(null, true);
+    }
     return callback(new Error("Not allowed by CORS"));
   },
   credentials: true,
@@ -53,6 +65,9 @@ app.use(limiter);
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
+// Serve static files (for test UI)
+app.use(express.static("public"));
+
 // Connect to MongoDB
 mongoose
   .connect(process.env.MONGODB_URI, {
@@ -67,6 +82,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/thesis", thesisRoutes);
 app.use("/api/pitch-decks", pitchDeckRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/live-conversations", liveConversationRoutes);
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
@@ -91,8 +107,47 @@ app.use("*", (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
+
+// Create HTTP server from Express app
+const server = http.createServer(app);
+
+// Initialize Socket.IO with CORS configuration
+const io = new Server(server, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
+  transports: ["websocket", "polling"],
 });
 
-module.exports = app;
+// WebSocket authentication middleware
+io.use(websocketAuth);
+
+// WebSocket connection handler
+io.on("connection", (socket) => {
+  console.log(`WebSocket client connected: ${socket.userId}`);
+
+  // Initialize WebSocket handlers
+  const {
+    setupLiveConversationHandlers,
+  } = require("./routes/liveConversation");
+  setupLiveConversationHandlers(io, socket);
+
+  socket.on("disconnect", (reason) => {
+    console.log(
+      `WebSocket client disconnected: ${socket.userId}, reason: ${reason}`
+    );
+  });
+
+  socket.on("error", (error) => {
+    console.error(`WebSocket error for ${socket.userId}:`, error);
+  });
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`WebSocket server ready`);
+});
+
+module.exports = { app, server, io };

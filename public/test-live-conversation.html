@@ -1,0 +1,1318 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Live Conversation Tester</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Oxygen, Ubuntu, Cantarell, sans-serif;
+        background: #f5f5f5;
+        padding: 20px;
+        max-width: 1400px;
+        margin: 0 auto;
+      }
+
+      .container {
+        display: grid;
+        grid-template-columns: 350px 1fr;
+        gap: 20px;
+        height: calc(100vh - 40px);
+      }
+
+      .sidebar {
+        background: white;
+        border-radius: 8px;
+        padding: 20px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        overflow-y: auto;
+      }
+
+      .main-content {
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+      }
+
+      .card {
+        background: white;
+        border-radius: 8px;
+        padding: 20px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+
+      h1 {
+        color: #333;
+        margin-bottom: 20px;
+        font-size: 24px;
+      }
+
+      h2 {
+        color: #555;
+        margin-bottom: 15px;
+        font-size: 18px;
+        border-bottom: 2px solid #007bff;
+        padding-bottom: 8px;
+      }
+
+      .form-group {
+        margin-bottom: 15px;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 5px;
+        color: #666;
+        font-size: 14px;
+        font-weight: 500;
+      }
+
+      input[type="text"],
+      input[type="password"],
+      select {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+
+      input:focus,
+      select:focus {
+        outline: none;
+        border-color: #007bff;
+      }
+
+      button {
+        width: 100%;
+        padding: 12px;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        margin-top: 10px;
+        transition: background 0.2s;
+      }
+
+      button:hover:not(:disabled) {
+        background: #0056b3;
+      }
+
+      button:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+      }
+
+      .btn-danger {
+        background: #dc3545;
+      }
+
+      .btn-danger:hover:not(:disabled) {
+        background: #c82333;
+      }
+
+      .btn-success {
+        background: #28a745;
+      }
+
+      .btn-success:hover:not(:disabled) {
+        background: #218838;
+      }
+
+      .status {
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 15px;
+        font-size: 13px;
+      }
+
+      .status.connected {
+        background: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+      }
+
+      .status.disconnected {
+        background: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+      }
+
+      .status.info {
+        background: #d1ecf1;
+        color: #0c5460;
+        border: 1px solid #bee5eb;
+      }
+
+      .output {
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 4px;
+        padding: 15px;
+        max-height: 300px;
+        overflow-y: auto;
+        font-family: "Courier New", monospace;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .log-entry {
+        margin-bottom: 8px;
+        padding: 8px;
+        border-left: 3px solid #007bff;
+        background: white;
+        border-radius: 2px;
+      }
+
+      .log-entry.error {
+        border-left-color: #dc3545;
+        background: #ffe6e6;
+      }
+
+      .log-entry.success {
+        border-left-color: #28a745;
+        background: #e6ffe6;
+      }
+
+      .log-entry.warning {
+        border-left-color: #ffc107;
+        background: #fff8e1;
+      }
+
+      .suggestions {
+        background: #e7f3ff;
+        border: 1px solid #b3d9ff;
+        border-radius: 4px;
+        padding: 15px;
+        margin-top: 10px;
+      }
+
+      .suggestion-item {
+        background: white;
+        padding: 10px;
+        margin: 8px 0;
+        border-radius: 4px;
+        border-left: 4px solid #007bff;
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+      }
+
+      .suggestion-item.answered {
+        border-left-color: #28a745;
+        opacity: 0.7;
+      }
+
+      .suggestion-item input[type="checkbox"] {
+        margin-top: 3px;
+        cursor: pointer;
+      }
+
+      .suggestion-item-content {
+        flex: 1;
+      }
+
+      .suggestion-item strong {
+        color: #007bff;
+        display: block;
+        margin-bottom: 5px;
+      }
+
+      .suggestion-item.answered strong {
+        color: #28a745;
+        text-decoration: line-through;
+      }
+
+      .suggestion-item-delete {
+        background: #dc3545;
+        color: white;
+        border: none;
+        border-radius: 3px;
+        padding: 5px 10px;
+        cursor: pointer;
+        font-size: 12px;
+        opacity: 0.7;
+        transition: opacity 0.2s;
+      }
+
+      .suggestion-item-delete:hover {
+        opacity: 1;
+      }
+
+      .transcript-entry {
+        padding: 10px;
+        margin: 5px 0;
+        background: #f8f9fa;
+        border-radius: 4px;
+        border-left: 3px solid #6c757d;
+      }
+
+      .transcript-entry.final {
+        border-left-color: #28a745;
+        background: #f0f8f0;
+      }
+
+      .session-info {
+        background: #f8f9fa;
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 15px;
+        font-size: 13px;
+      }
+
+      .session-info strong {
+        color: #333;
+      }
+
+      .audio-controls {
+        display: flex;
+        gap: 10px;
+        margin-top: 10px;
+      }
+
+      .audio-controls button {
+        flex: 1;
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>🎤 Live Conversation Backend Tester</h1>
+
+    <div class="container">
+      <div class="sidebar">
+        <h2>Configuration</h2>
+
+        <div class="form-group">
+          <label>Server URL</label>
+          <input
+            type="text"
+            id="serverUrl"
+            value="http://localhost:5000"
+            placeholder="http://localhost:5000"
+          />
+        </div>
+
+        <div class="form-group">
+          <label>JWT Token</label>
+          <input
+            type="text"
+            id="jwtToken"
+            placeholder="Your JWT token from login"
+            value="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI2OGZmOTFkZmQxYWZiNDYwNDNlZmU1MGYiLCJyb2xlIjoiU0EiLCJpYXQiOjE3NjQzOTkxNjksImV4cCI6MTc2NTAwMzk2OX0.YvCro-7IgqXfagG1QdVuUO_1OywxyYlUjoftjdIb7qc"
+          />
+          <small style="color: #666; font-size: 12px"
+            >Get this from /api/auth/login</small
+          >
+        </div>
+
+        <div class="form-group">
+          <label>Pitch Deck ID</label>
+          <input
+            type="text"
+            id="pitchDeckId"
+            placeholder="Pitch deck ID to test with"
+            value="6915856cd25ab394ab6e4ae1"
+          />
+        </div>
+
+        <div id="connectionStatus" class="status disconnected">
+          ⚫ Not Connected
+        </div>
+
+        <button onclick="login()" id="loginBtn" type="button">
+          1. Login / Verify Token
+        </button>
+        <button onclick="startSession()" id="startBtn" disabled>
+          2. Start Session
+        </button>
+        <button onclick="connectWebSocket()" id="connectBtn" disabled>
+          3. Connect WebSocket
+        </button>
+        <button onclick="stopSession()" id="stopBtn" disabled>
+          4. Stop Session
+        </button>
+
+        <div id="sessionInfo" class="session-info" style="display: none">
+          <strong>Session Info:</strong><br />
+          <span id="sessionIdDisplay">-</span><br />
+          <span id="sessionStatus">-</span>
+        </div>
+
+        <h2 style="margin-top: 20px">Audio Test</h2>
+        <div class="form-group">
+          <label for="audioSource">Audio Source:</label>
+          <select id="audioSource">
+            <option value="microphone">Microphone Only</option>
+            <option value="system">
+              System/Tab Audio Only (Google Meet, Zoom, etc.)
+            </option>
+            <option value="both" selected>
+              Both Microphone + System Audio (Recommended)
+            </option>
+          </select>
+          <small style="color: #666; display: block; margin-top: 5px">
+            Select "Both" to capture your voice and meeting participants.
+            Speaker diarization will identify different speakers.
+          </small>
+        </div>
+        <div class="audio-controls">
+          <button onclick="startAudioCapture()" id="audioStartBtn" disabled>
+            Start Audio Capture
+          </button>
+          <button
+            onclick="stopAudioCapture()"
+            id="audioStopBtn"
+            disabled
+            class="btn-danger"
+          >
+            Stop Audio Capture
+          </button>
+        </div>
+        <button onclick="sendMockAudio()" id="mockAudioBtn" disabled>
+          Send Mock Audio
+        </button>
+
+        <h2 style="margin-top: 20px">Actions</h2>
+        <button onclick="getSessionDetails()" id="getSessionBtn" disabled>
+          Get Session Details
+        </button>
+        <button onclick="getTranscript()" id="getTranscriptBtn" disabled>
+          Get Full Transcript
+        </button>
+        <button onclick="clearLogs()" class="btn-danger">Clear Logs</button>
+      </div>
+
+      <div class="main-content">
+        <div class="card">
+          <h2>📝 Live Transcript</h2>
+          <div id="transcriptOutput" class="output" style="min-height: 200px">
+            <div style="color: #999; text-align: center; padding: 20px">
+              Transcripts will appear here...
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>💡 AI Suggestions</h2>
+          <div
+            id="suggestionsOutput"
+            class="suggestions"
+            style="min-height: 150px"
+          >
+            <div style="color: #666; text-align: center; padding: 20px">
+              Question suggestions will appear here...
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>📊 Logs</h2>
+          <div id="logOutput" class="output" style="max-height: 300px">
+            <div style="color: #999; text-align: center; padding: 20px">
+              Logs will appear here...
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      let socket = null;
+      let currentSessionId = null;
+      let wsToken = null;
+      let mediaStream = null;
+      let mediaRecorder = null; // Changed from audioContext/processor to MediaRecorder
+      let isRecording = false;
+      let suggestedQuestions = []; // Store all suggested questions
+
+      const API_BASE = () => document.getElementById("serverUrl").value;
+      const JWT_TOKEN = () => document.getElementById("jwtToken").value;
+      const PITCH_DECK_ID = () => document.getElementById("pitchDeckId").value;
+
+      function log(message, type = "info") {
+        const output = document.getElementById("logOutput");
+        const entry = document.createElement("div");
+        entry.className = `log-entry ${type}`;
+        const timestamp = new Date().toLocaleTimeString();
+        entry.textContent = `[${timestamp}] ${message}`;
+        output.appendChild(entry);
+        output.scrollTop = output.scrollHeight;
+      }
+
+      function updateStatus(status, message) {
+        const statusEl = document.getElementById("connectionStatus");
+        statusEl.className = `status ${status}`;
+        statusEl.textContent = message;
+      }
+
+      function clearLogs() {
+        document.getElementById("logOutput").innerHTML = "";
+        document.getElementById("transcriptOutput").innerHTML = "";
+        document.getElementById("suggestionsOutput").innerHTML = "";
+      }
+
+      async function login() {
+        console.log("Login button clicked");
+        const token = JWT_TOKEN();
+        const serverUrl = API_BASE();
+
+        if (!token) {
+          alert("Please enter JWT token");
+          return;
+        }
+
+        if (!serverUrl) {
+          alert("Please enter server URL");
+          return;
+        }
+
+        // Clear previous logs
+        const logOutput = document.getElementById("logOutput");
+        if (logOutput.children.length === 1) {
+          logOutput.innerHTML = "";
+        }
+
+        log(`Attempting to verify token at ${serverUrl}...`, "info");
+        console.log("Making request to:", `${serverUrl}/api/users/me`);
+
+        try {
+          const response = await fetch(`${serverUrl}/api/users/me`, {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          });
+
+          console.log("Response status:", response.status);
+          console.log("Response headers:", response.headers);
+
+          let data;
+          try {
+            data = await response.json();
+            console.log("Response data:", data);
+          } catch (jsonError) {
+            console.error("Failed to parse JSON:", jsonError);
+            const text = await response.text();
+            console.error("Response text:", text);
+            throw new Error(`Invalid JSON response: ${text.substring(0, 100)}`);
+          }
+
+          if (response.ok) {
+            log(
+              `✅ Token valid. Logged in as: ${data.user?.email || "User"}`,
+              "success"
+            );
+            document.getElementById("startBtn").disabled = false;
+            updateStatus("info", "✅ Token Valid");
+          } else {
+            const errorMsg =
+              data.message || `HTTP ${response.status}: ${response.statusText}`;
+            log(`❌ Login failed: ${errorMsg}`, "error");
+            updateStatus("disconnected", "❌ Invalid Token");
+            console.error("Login error response:", data);
+          }
+        } catch (error) {
+          console.error("Login error details:", error);
+          log(`❌ Login failed: ${error.message}`, "error");
+          updateStatus("disconnected", "❌ Connection Error");
+
+          // Check if it's a network error
+          if (
+            error.message.includes("Failed to fetch") ||
+            error.message.includes("NetworkError") ||
+            error.name === "TypeError"
+          ) {
+            log(
+              "💡 Tip: Make sure your server is running at " + serverUrl,
+              "warning"
+            );
+            log(
+              "💡 Tip: If opening file directly, use http://localhost:5000/test-live-conversation.html instead",
+              "warning"
+            );
+            log(
+              "💡 Tip: Check browser console (F12) for CORS errors",
+              "warning"
+            );
+          }
+        }
+      }
+
+      async function startSession() {
+        const token = JWT_TOKEN();
+        const pitchDeckId = PITCH_DECK_ID();
+
+        if (!token || !pitchDeckId) {
+          alert("Please enter JWT token and Pitch Deck ID");
+          return;
+        }
+
+        try {
+          log("Starting session...", "info");
+          const response = await fetch(
+            `${API_BASE()}/api/live-conversations/start`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                pitchDeckId: pitchDeckId,
+                title: "Test Session - " + new Date().toLocaleString(),
+              }),
+            }
+          );
+
+          if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.message || "Failed to start session");
+          }
+
+          const data = await response.json();
+          currentSessionId = data.sessionId;
+          wsToken = data.token;
+
+          log(`✅ Session started: ${currentSessionId}`, "success");
+          document.getElementById(
+            "sessionIdDisplay"
+          ).textContent = `ID: ${currentSessionId}`;
+          document.getElementById("sessionStatus").textContent =
+            "Status: ACTIVE";
+          document.getElementById("sessionInfo").style.display = "block";
+          document.getElementById("connectBtn").disabled = false;
+          document.getElementById("stopBtn").disabled = false;
+          document.getElementById("getSessionBtn").disabled = false;
+          document.getElementById("getTranscriptBtn").disabled = false;
+          updateStatus("info", "✅ Session Started");
+        } catch (error) {
+          log(`❌ Failed to start session: ${error.message}`, "error");
+        }
+      }
+
+      function connectWebSocket() {
+        if (!wsToken) {
+          alert("Please start a session first");
+          return;
+        }
+
+        const serverUrl = API_BASE();
+        log(`Connecting to WebSocket at ${serverUrl}...`, "info");
+
+        socket = io(serverUrl, {
+          auth: {
+            token: wsToken,
+          },
+          transports: ["websocket", "polling"],
+        });
+
+        socket.on("connect", () => {
+          log("✅ WebSocket connected", "success");
+          updateStatus("connected", "🟢 WebSocket Connected");
+          document.getElementById("connectBtn").disabled = true;
+          document.getElementById("mockAudioBtn").disabled = false;
+          document.getElementById("audioStartBtn").disabled = false;
+
+          // Reset error tracking
+          socket.lastError = null;
+
+          // Join session
+          if (currentSessionId) {
+            log("Joining session...", "info");
+            socket.emit("join-session", { sessionId: currentSessionId });
+          }
+        });
+
+        socket.on("disconnect", (reason) => {
+          log(`❌ WebSocket disconnected: ${reason}`, "error");
+          updateStatus("disconnected", "🔴 Disconnected");
+          document.getElementById("connectBtn").disabled = false;
+          document.getElementById("mockAudioBtn").disabled = true;
+          document.getElementById("audioStartBtn").disabled = true;
+          stopAudioCapture();
+        });
+
+        socket.on("connect_error", (error) => {
+          log(`❌ Connection error: ${error.message}`, "error");
+        });
+
+        socket.on("session-status", (data) => {
+          log(
+            `📊 Session status: ${data.message}`,
+            data.status === "connected" ? "success" : "warning"
+          );
+          if (data.status === "connected") {
+            document.getElementById("mockAudioBtn").disabled = false;
+            document.getElementById("audioStartBtn").disabled = false;
+          } else if (
+            data.status === "transcription_disconnected" ||
+            data.status === "transcription_error"
+          ) {
+            // Only stop audio if it's a persistent error (connection lost), not during initialization
+            if (data.message && data.message.includes("connection lost")) {
+              stopAudioCapture();
+              document.getElementById("mockAudioBtn").disabled = true;
+              document.getElementById("audioStartBtn").disabled = true;
+              log(
+                "⚠️ Audio capture stopped due to transcription error",
+                "warning"
+              );
+            } else {
+              // Just log the warning, don't stop audio (might be temporary during initialization)
+              log(`⚠️ ${data.message}`, "warning");
+            }
+          }
+        });
+
+        socket.on("transcription", (data) => {
+          const transcriptDiv = document.getElementById("transcriptOutput");
+          const entry = document.createElement("div");
+          entry.className = `transcript-entry ${data.isFinal ? "final" : ""}`;
+          entry.innerHTML = `
+                    <strong>${
+                      data.isFinal ? "✓ Final" : "... Interim"
+                    }</strong> 
+                    <span style="color: #666;">[${new Date(
+                      data.timestamp
+                    ).toLocaleTimeString()}]</span><br>
+                    ${data.text}
+                `;
+          transcriptDiv.appendChild(entry);
+          transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
+          log(
+            `📝 Transcription: ${data.text} ${
+              data.isFinal ? "(final)" : "(interim)"
+            }`,
+            "info"
+          );
+        });
+
+        socket.on("suggestion", (data) => {
+          // Update questions list - new questions are added to the top
+          if (data.questions && Array.isArray(data.questions)) {
+            // Merge new questions with existing ones (avoid duplicates)
+            const existingIds = new Set(suggestedQuestions.map((q) => q.id));
+            const newQuestions = data.questions.filter(
+              (q) => !existingIds.has(q.id)
+            );
+            suggestedQuestions = [...newQuestions, ...suggestedQuestions];
+          }
+          renderSuggestedQuestions();
+          log(
+            `💡 Updated questions list (${suggestedQuestions.length} total)`,
+            "success"
+          );
+        });
+
+        socket.on("suggested-questions-updated", (data) => {
+          // Update questions when answered status changes
+          if (data.questions && Array.isArray(data.questions)) {
+            const updatedIds = new Set(data.questions.map((q) => q.id));
+            // Keep deleted questions out, update existing ones
+            suggestedQuestions = suggestedQuestions
+              .filter((q) => updatedIds.has(q.id))
+              .map((existing) => {
+                const updated = data.questions.find(
+                  (q) => q.id === existing.id
+                );
+                return updated || existing;
+              });
+            // Add any new questions
+            const existingIds = new Set(suggestedQuestions.map((q) => q.id));
+            const newQuestions = data.questions.filter(
+              (q) => !existingIds.has(q.id)
+            );
+            suggestedQuestions = [...newQuestions, ...suggestedQuestions];
+          }
+          renderSuggestedQuestions();
+        });
+
+        function renderSuggestedQuestions() {
+          const suggestionsDiv = document.getElementById("suggestionsOutput");
+          suggestionsDiv.innerHTML = "";
+
+          if (suggestedQuestions.length === 0) {
+            suggestionsDiv.innerHTML =
+              '<div style="color: #666; text-align: center; padding: 20px">Question suggestions will appear here...</div>';
+            return;
+          }
+
+          const header = document.createElement("div");
+          header.style.marginBottom = "10px";
+          header.innerHTML = `<strong>💡 Suggested Questions (${suggestedQuestions.length})</strong>`;
+          suggestionsDiv.appendChild(header);
+
+          suggestedQuestions.forEach((questionItem, index) => {
+            const item = document.createElement("div");
+            item.className = `suggestion-item ${
+              questionItem.answered ? "answered" : ""
+            }`;
+            item.id = `question-${questionItem.id}`;
+
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.checked = questionItem.answered;
+            checkbox.onchange = () =>
+              markQuestionAnswered(questionItem.id, checkbox.checked);
+
+            const content = document.createElement("div");
+            content.className = "suggestion-item-content";
+            content.innerHTML = `<strong>Q${index + 1}:</strong> ${
+              questionItem.question
+            }`;
+
+            const deleteBtn = document.createElement("button");
+            deleteBtn.className = "suggestion-item-delete";
+            deleteBtn.textContent = "Delete";
+            deleteBtn.onclick = () => deleteQuestion(questionItem.id);
+
+            item.appendChild(checkbox);
+            item.appendChild(content);
+            item.appendChild(deleteBtn);
+            suggestionsDiv.appendChild(item);
+          });
+        }
+
+        async function markQuestionAnswered(questionId, answered) {
+          if (!currentSessionId || !answered) return; // Only handle marking as answered
+
+          const token = JWT_TOKEN();
+          try {
+            const response = await fetch(
+              `${API_BASE()}/api/live-conversations/${currentSessionId}/questions/${questionId}/answered`,
+              {
+                method: "PATCH",
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                },
+              }
+            );
+
+            if (response.ok) {
+              log(
+                `✅ Question marked as answered, generating replacement...`,
+                "success"
+              );
+              // The server will emit updated questions via WebSocket
+            } else {
+              const error = await response.json();
+              log(
+                `❌ Failed to mark question as answered: ${error.message}`,
+                "error"
+              );
+              // Revert checkbox
+              const question = suggestedQuestions.find(
+                (q) => q.id === questionId
+              );
+              if (question) {
+                question.answered = false;
+                renderSuggestedQuestions();
+              }
+            }
+          } catch (error) {
+            log(
+              `❌ Error marking question as answered: ${error.message}`,
+              "error"
+            );
+            // Revert checkbox
+            const question = suggestedQuestions.find(
+              (q) => q.id === questionId
+            );
+            if (question) {
+              question.answered = false;
+              renderSuggestedQuestions();
+            }
+          }
+        }
+
+        async function deleteQuestion(questionId) {
+          if (!currentSessionId) return;
+
+          const token = JWT_TOKEN();
+          try {
+            const response = await fetch(
+              `${API_BASE()}/api/live-conversations/${currentSessionId}/questions/${questionId}`,
+              {
+                method: "DELETE",
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                },
+              }
+            );
+
+            if (response.ok) {
+              // Remove from local list
+              suggestedQuestions = suggestedQuestions.filter(
+                (q) => q.id !== questionId
+              );
+              renderSuggestedQuestions();
+              log(`🗑️ Question deleted`, "success");
+            } else {
+              const error = await response.json();
+              log(`❌ Failed to delete question: ${error.message}`, "error");
+            }
+          } catch (error) {
+            log(`❌ Error deleting question: ${error.message}`, "error");
+          }
+        }
+
+        socket.on("error", (error) => {
+          // Only log unique errors to prevent spam
+          const errorKey = error.code || error.message;
+          if (!socket.lastError || socket.lastError !== errorKey) {
+            log(`❌ Error: ${error.message || JSON.stringify(error)}`, "error");
+            socket.lastError = errorKey;
+
+            // Stop audio if transcription errors occur
+            if (
+              error.code === "TRANSCRIPTION_DISCONNECTED" ||
+              error.code === "TRANSCRIPTION_ERROR" ||
+              error.code === "TRANSCRIPTION_NOT_READY"
+            ) {
+              stopAudioCapture();
+              document.getElementById("mockAudioBtn").disabled = true;
+              document.getElementById("audioStartBtn").disabled = true;
+            }
+          }
+        });
+
+        socket.on("pong", () => {
+          log("🏓 Pong received", "info");
+        });
+      }
+
+      async function stopSession() {
+        if (!currentSessionId) return;
+
+        const token = JWT_TOKEN();
+        try {
+          stopAudioCapture();
+          if (socket) {
+            socket.disconnect();
+            socket = null;
+          }
+
+          const response = await fetch(
+            `${API_BASE()}/api/live-conversations/${currentSessionId}/stop`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            }
+          );
+
+          if (response.ok) {
+            const data = await response.json();
+            log(
+              `✅ Session stopped. Duration: ${data.totalDuration}s, Transcripts: ${data.transcriptCount}`,
+              "success"
+            );
+            document.getElementById("sessionStatus").textContent =
+              "Status: ENDED";
+            document.getElementById("connectBtn").disabled = true;
+            document.getElementById("stopBtn").disabled = true;
+            updateStatus("info", "✅ Session Ended");
+          }
+        } catch (error) {
+          log(`❌ Failed to stop session: ${error.message}`, "error");
+        }
+      }
+
+      async function getSessionDetails() {
+        if (!currentSessionId) return;
+
+        const token = JWT_TOKEN();
+        try {
+          const response = await fetch(
+            `${API_BASE()}/api/live-conversations/${currentSessionId}`,
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            }
+          );
+
+          if (response.ok) {
+            const data = await response.json();
+            log(
+              `📊 Session Details: ${JSON.stringify(data, null, 2)}`,
+              "success"
+            );
+          }
+        } catch (error) {
+          log(`❌ Failed to get session details: ${error.message}`, "error");
+        }
+      }
+
+      async function getTranscript() {
+        if (!currentSessionId) return;
+
+        const token = JWT_TOKEN();
+        try {
+          const response = await fetch(
+            `${API_BASE()}/api/live-conversations/${currentSessionId}/transcript`,
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            }
+          );
+
+          if (response.ok) {
+            const data = await response.json();
+            log(`📝 Transcript: ${data.entries.length} entries`, "success");
+            console.log("Full transcript:", data);
+          }
+        } catch (error) {
+          log(`❌ Failed to get transcript: ${error.message}`, "error");
+        }
+      }
+
+      function sendMockAudio() {
+        if (!socket || !socket.connected || !currentSessionId) {
+          alert("Please connect WebSocket first");
+          return;
+        }
+
+        // Create mock audio data (16-bit PCM, 16kHz, mono)
+        // Generate a simple sine wave for testing (not silence)
+        const sampleRate = 16000;
+        const frequency = 440; // A4 note
+        const duration = 0.1; // 100ms
+        const samples = Math.floor(sampleRate * duration);
+        const mockAudio = new Int16Array(samples);
+
+        for (let i = 0; i < samples; i++) {
+          // Generate sine wave
+          const sample = Math.sin(2 * Math.PI * frequency * (i / sampleRate));
+          mockAudio[i] = Math.max(
+            -32768,
+            Math.min(32767, Math.round(sample * 32767 * 0.5))
+          );
+        }
+
+        // Convert Int16Array to Uint8Array (browser-compatible, no Buffer)
+        const uint8Array = new Uint8Array(mockAudio.buffer);
+
+        // Convert to base64 (browser-compatible method)
+        let binaryString = "";
+        const len = uint8Array.length;
+        const chunkSize = 8192;
+        for (let i = 0; i < len; i += chunkSize) {
+          const chunk = uint8Array.subarray(i, Math.min(i + chunkSize, len));
+          binaryString += String.fromCharCode.apply(null, Array.from(chunk));
+        }
+        const base64 = btoa(binaryString);
+
+        socket.emit("audio-chunk", {
+          sessionId: currentSessionId,
+          audioData: base64,
+          format: "linear16",
+        });
+
+        log("📤 Sent mock audio chunk (sine wave)", "info");
+      }
+
+      async function startAudioCapture() {
+        try {
+          // Check if socket and transcription are ready
+          if (!socket || !socket.connected) {
+            alert("Please connect WebSocket first");
+            return;
+          }
+
+          const audioSource = document.getElementById("audioSource").value;
+
+          // Based on Deepgram docs: WebM/Opus from MediaRecorder can be unreliable
+          // Better approach: Transcode to PCM (linear16) for reliable Deepgram streaming
+          // This matches the pattern from GitHub discussions where explicit encoding fixed disconnects
+
+          // Use Web Audio API to capture and mix raw PCM audio
+          const audioContext = new (window.AudioContext ||
+            window.webkitAudioContext)({
+            sampleRate: 16000,
+          });
+
+          let micStream = null;
+          let systemStream = null;
+          const audioSources = [];
+
+          // Capture microphone if needed
+          if (audioSource === "microphone" || audioSource === "both") {
+            log("🎤 Requesting microphone access...", "info");
+            micStream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                sampleRate: 16000,
+              },
+            });
+            const micSource = audioContext.createMediaStreamSource(micStream);
+            audioSources.push(micSource);
+            log("✅ Microphone audio captured successfully", "success");
+          }
+
+          // Capture system/tab audio if needed
+          if (audioSource === "system" || audioSource === "both") {
+            log("📺 Requesting system/tab audio capture...", "info");
+            if (audioSource === "both") {
+              log(
+                "💡 Please select 'Share tab' or 'Share screen' and enable 'Share tab audio' in the browser dialog",
+                "info"
+              );
+            }
+
+            // Note: Most browsers require video: true for getDisplayMedia
+            const displayStream = await navigator.mediaDevices.getDisplayMedia({
+              video: {
+                displaySurface: "browser", // Prefer tab sharing
+              },
+              audio: {
+                echoCancellation: false, // Disable for system audio
+                noiseSuppression: false,
+                autoGainControl: false,
+                sampleRate: 16000,
+                suppressLocalAudioPlayback: false, // Allow system audio
+              },
+            });
+
+            // Check if audio track is available
+            const audioTracks = displayStream.getAudioTracks();
+            if (audioTracks.length === 0) {
+              // Stop video track if no audio
+              displayStream.getVideoTracks().forEach((track) => track.stop());
+              throw new Error(
+                "No audio track available. Please enable 'Share tab audio' when sharing."
+              );
+            }
+
+            // Create a stream with only the audio track
+            systemStream = new MediaStream(audioTracks);
+
+            // Stop the video track since we don't need it
+            displayStream.getVideoTracks().forEach((track) => {
+              track.stop(); // Stop video track to save resources
+            });
+
+            const systemSource =
+              audioContext.createMediaStreamSource(systemStream);
+            audioSources.push(systemSource);
+            log("✅ System/tab audio captured successfully", "success");
+          }
+
+          // Create a mixer node to combine all audio sources
+          const mixer = audioContext.createGain();
+          mixer.gain.value = 1.0; // Full volume
+
+          // Connect all sources to the mixer
+          audioSources.forEach((source) => {
+            source.connect(mixer);
+          });
+
+          // Store references for cleanup
+          if (micStream) {
+            mediaStream = micStream; // Use mic stream as primary for cleanup
+          } else if (systemStream) {
+            mediaStream = systemStream; // Use system stream as primary for cleanup
+          }
+
+          // Create a single source from the mixer for processing
+          const source = mixer;
+
+          // Create ScriptProcessorNode for PCM capture
+          // Buffer size: 4096 samples = ~256ms at 16kHz
+          const bufferSize = 4096;
+          const processor = audioContext.createScriptProcessor(
+            bufferSize,
+            1,
+            1
+          );
+
+          // Connect mixer to processor, then processor to destination
+          source.connect(processor);
+          processor.connect(audioContext.destination); // Required for ScriptProcessorNode
+
+          processor.onaudioprocess = (e) => {
+            // Check conditions before sending
+            if (
+              !isRecording ||
+              !socket ||
+              !socket.connected ||
+              !currentSessionId
+            ) {
+              return;
+            }
+
+            // Don't send if we've had transcription errors
+            if (
+              socket.lastError &&
+              (socket.lastError === "TRANSCRIPTION_DISCONNECTED" ||
+                socket.lastError === "TRANSCRIPTION_ERROR" ||
+                socket.lastError === "TRANSCRIPTION_NOT_READY")
+            ) {
+              return;
+            }
+
+            // Get PCM audio data (Float32Array, -1.0 to 1.0)
+            const inputData = e.inputBuffer.getChannelData(0);
+
+            // Convert Float32 (-1.0 to 1.0) to Int16 (16-bit PCM)
+            // Industry standard conversion (matches Deepgram examples)
+            const pcm16 = new Int16Array(inputData.length);
+            for (let i = 0; i < inputData.length; i++) {
+              const float32 = inputData[i];
+              // Clamp to [-1, 1] and convert to 16-bit integer
+              const clamped = Math.max(-1, Math.min(1, float32));
+              pcm16[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+            }
+
+            // Send as binary ArrayBuffer (Socket.IO handles this as binary)
+            socket.emit(
+              "audio-chunk",
+              {
+                sessionId: currentSessionId,
+                audioData: pcm16.buffer, // Int16Array's underlying ArrayBuffer
+                format: "linear16", // Explicit PCM format
+              },
+              {
+                binary: true, // Explicitly mark as binary
+              }
+            );
+          };
+
+          // Store references for cleanup
+          mediaRecorder = {
+            _audioContext: audioContext,
+            _processor: processor,
+            _sources: audioSources,
+            _mixer: source, // The mixer node
+            _micStream: micStream,
+            _systemStream: systemStream,
+            stop: function () {
+              if (this._processor) {
+                this._processor.disconnect();
+              }
+              if (this._mixer) {
+                this._mixer.disconnect();
+              }
+              if (this._sources) {
+                this._sources.forEach((s) => s.disconnect());
+              }
+              if (this._audioContext) {
+                this._audioContext.close();
+              }
+            },
+            state: "recording",
+          };
+
+          isRecording = true;
+
+          document.getElementById("audioStartBtn").disabled = true;
+          document.getElementById("audioStopBtn").disabled = false;
+          document.getElementById("audioSource").disabled = true;
+
+          // Handle track ended (user stops sharing in browser)
+          if (micStream) {
+            micStream.getAudioTracks().forEach((track) => {
+              track.onended = () => {
+                log("⚠️ Microphone track ended", "warning");
+                stopAudioCapture();
+              };
+            });
+          }
+
+          if (systemStream) {
+            systemStream.getAudioTracks().forEach((track) => {
+              track.onended = () => {
+                log(
+                  "⚠️ System audio track ended (user stopped sharing)",
+                  "warning"
+                );
+                stopAudioCapture();
+              };
+            });
+          }
+
+          let sourceType = "";
+          if (audioSource === "both") {
+            sourceType = "Microphone + System/Tab Audio";
+          } else if (audioSource === "system") {
+            sourceType = "System/Tab Audio";
+          } else {
+            sourceType = "Microphone";
+          }
+
+          log(
+            `🎤 ${sourceType} capture started (PCM linear16 @ 16kHz - recommended for Deepgram)`,
+            "success"
+          );
+          if (audioSource === "both") {
+            log(
+              "💡 Speaker diarization will identify different speakers in the conversation",
+              "info"
+            );
+          }
+        } catch (error) {
+          log(`❌ Error starting audio: ${error.message}`, "error");
+          console.error("Audio capture error:", error);
+        }
+      }
+
+      function stopAudioCapture() {
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+          mediaRecorder.stop();
+          mediaRecorder = null;
+        }
+        if (mediaStream) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          mediaStream = null;
+        }
+        // Also stop any additional streams that might exist
+        if (mediaRecorder && mediaRecorder._micStream) {
+          mediaRecorder._micStream.getTracks().forEach((track) => track.stop());
+        }
+        if (mediaRecorder && mediaRecorder._systemStream) {
+          mediaRecorder._systemStream
+            .getTracks()
+            .forEach((track) => track.stop());
+        }
+        isRecording = false;
+
+        document.getElementById("audioStartBtn").disabled = false;
+        document.getElementById("audioStopBtn").disabled = true;
+        document.getElementById("audioSource").disabled = false;
+        log("🛑 Audio capture stopped", "info");
+      }
+
+      // Auto-load from URL params
+      window.onload = () => {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get("token")) {
+          document.getElementById("jwtToken").value = params.get("token");
+        }
+        if (params.get("pitchDeckId")) {
+          document.getElementById("pitchDeckId").value =
+            params.get("pitchDeckId");
+        }
+        if (params.get("serverUrl")) {
+          document.getElementById("serverUrl").value = params.get("serverUrl");
+        }
+      };
+    </script>
+  </body>
+</html>

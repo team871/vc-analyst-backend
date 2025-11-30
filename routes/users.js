@@ -5,6 +5,25 @@ const { authMiddleware, requireSA } = require("../middleware/auth");
 
 const router = express.Router();
 
+// Get current user info
+router.get("/me", authMiddleware, async (req, res) => {
+  try {
+    res.json({
+      user: {
+        id: req.user._id,
+        email: req.user.email,
+        firstName: req.user.firstName,
+        lastName: req.user.lastName,
+        role: req.user.role,
+        organization: req.user.organization,
+      },
+    });
+  } catch (error) {
+    console.error("Get current user error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 // Create analyst (SA only)
 router.post(
   "/create-analyst",

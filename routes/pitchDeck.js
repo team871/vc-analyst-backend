@@ -406,6 +406,59 @@ router.get("/", authMiddleware, requireSAOrAnalyst, async (req, res) => {
   }
 });
 
+// Get live sessions for a pitch deck
+router.get(
+  "/:id/live-sessions",
+  authMiddleware,
+  requireSAOrAnalyst,
+  async (req, res) => {
+    try {
+      const query = {
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query);
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      const LiveConversation = require("../models/LiveConversation");
+      const sessions = await LiveConversation.find({
+        pitchDeck: pitchDeck._id,
+        organization: req.user.organization._id,
+        isActive: true,
+      })
+        .sort({ createdAt: -1 })
+        .select(
+          "_id title status startedAt endedAt totalDuration transcriptCount suggestionCount"
+        )
+        .lean();
+
+      res.json({
+        sessions: sessions.map((s) => ({
+          sessionId: s._id.toString(),
+          title: s.title,
+          status: s.status,
+          createdAt: s.startedAt,
+          endedAt: s.endedAt,
+          duration: s.totalDuration,
+          transcriptCount: s.transcriptCount,
+          suggestionCount: s.suggestionCount,
+        })),
+      });
+    } catch (error) {
+      console.error("Get live sessions error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
 // Get specific pitch deck
 router.get("/:id", authMiddleware, requireSAOrAnalyst, async (req, res) => {
   try {
