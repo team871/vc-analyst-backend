@@ -35,20 +35,44 @@ const allowedOrigins = [
 const corsOptions = {
   origin: (origin, callback) => {
     // Allow requests with no origin (like mobile apps, Postman, or file://)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
+    if (!origin) {
+      console.log("CORS: Request with no origin, allowing");
+      return callback(null, true);
+    }
+    console.log(`CORS: Checking origin: ${origin}`);
+    if (allowedOrigins.includes(origin)) {
+      console.log(`CORS: Origin ${origin} is allowed`);
+      return callback(null, true);
+    }
     // In development, allow localhost with any port
     if (
       process.env.NODE_ENV === "development" &&
       origin.startsWith("http://localhost:")
     ) {
+      console.log(
+        `CORS: Development mode, allowing localhost origin: ${origin}`
+      );
       return callback(null, true);
     }
+    console.error(
+      `CORS: Origin ${origin} is NOT allowed. Allowed origins:`,
+      allowedOrigins
+    );
     return callback(new Error("Not allowed by CORS"));
   },
   credentials: true,
   methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "Accept",
+    "Origin",
+    "X-Requested-With",
+    "Access-Control-Request-Method",
+    "Access-Control-Request-Headers",
+  ],
+  exposedHeaders: ["Content-Type", "Authorization"],
+  maxAge: 86400, // 24 hours - cache preflight requests
 };
 
 app.use(cors(corsOptions));
@@ -92,6 +116,15 @@ app.get("/api/health", (req, res) => {
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
+
+  // Handle CORS errors specifically
+  if (err.message === "Not allowed by CORS") {
+    return res.status(403).json({
+      message: "CORS: Origin not allowed",
+      error: process.env.NODE_ENV === "development" ? err.message : "Forbidden",
+    });
+  }
+
   res.status(500).json({
     message: "Something went wrong!",
     error:
