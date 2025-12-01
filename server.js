@@ -21,45 +21,10 @@ app.set("trust proxy", 1);
 // Security middleware
 // app.use(helmet());
 // CORS configuration: allow specific frontends and handle preflight
-const allowedOrigins = [
-  "https://dealassist.alfawhocodes.com",
-  "http://dealassist.alfawhocodes.com",
-  // If you sometimes access via IP directly
-  "http://52.66.157.50",
-  "https://52.66.157.50",
-  // Local development
-  "http://localhost:3000",
-  "https://localhost:3000",
-];
-
+// CORS configuration: Allow all origins (for development/testing)
+// TODO: Restrict to specific origins in production
 const corsOptions = {
-  origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps, Postman, or file://)
-    if (!origin) {
-      console.log("CORS: Request with no origin, allowing");
-      return callback(null, true);
-    }
-    console.log(`CORS: Checking origin: ${origin}`);
-    if (allowedOrigins.includes(origin)) {
-      console.log(`CORS: Origin ${origin} is allowed`);
-      return callback(null, true);
-    }
-    // In development, allow localhost with any port
-    if (
-      process.env.NODE_ENV === "development" &&
-      origin.startsWith("http://localhost:")
-    ) {
-      console.log(
-        `CORS: Development mode, allowing localhost origin: ${origin}`
-      );
-      return callback(null, true);
-    }
-    console.error(
-      `CORS: Origin ${origin} is NOT allowed. Allowed origins:`,
-      allowedOrigins
-    );
-    return callback(new Error("Not allowed by CORS"));
-  },
+  origin: true, // Allow all origins
   credentials: true,
   methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
   allowedHeaders: [
@@ -147,7 +112,7 @@ const server = http.createServer(app);
 // Initialize Socket.IO with CORS configuration
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins,
+    origin: true, // Allow all origins for Socket.IO
     methods: ["GET", "POST"],
     credentials: true,
   },
