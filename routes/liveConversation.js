@@ -35,6 +35,317 @@ const router = express.Router();
 const activeSessions = new Map(); // sessionId -> { socket, audioBuffer, conversationBuffer, lastQuestionGeneration, initialQuestionsGenerated }
 
 /**
+ * Background processing for stopping a live conversation session.
+ * Handles full-audio transcription, summary generation, and history logging
+ * without blocking the HTTP response of the /:id/stop route.
+ * @param {string} sessionId - The live conversation session ID
+ */
+async function processSessionStop(sessionId) {
+  try {
+    const session = await LiveConversation.findById(sessionId);
+    if (!session) {
+      console.warn(
+        `[STOP-BG] Session ${sessionId} not found in background processor`
+      );
+      return;
+    }
+
+    const sessionIdString = session._id.toString();
+    console.log(`[STOP-BG] Processing stop for session ${sessionIdString}`);
+
+    // Get active session and audio buffer
+    const activeSession = activeSessions.get(sessionIdString);
+    let completeAudioRecording = null;
+
+    console.log(
+      `[STOP-BG] Session ${
+        session._id
+      }: Active session exists: ${!!activeSession}`
+    );
+
+    if (activeSession) {
+      console.log(
+        `[STOP-BG] Audio buffer size: ${
+          activeSession.audioBuffer?.length || 0
+        } bytes, Chunks received: ${activeSession.audioChunkCount || 0}`
+      );
+
+      // Close transcription connection if it exists
+      if (activeSession.transcription?.close) {
+        activeSession.transcription.close();
+      }
+
+      // Get complete audio from our buffer (always maintained)
+      if (activeSession.audioBuffer && activeSession.audioBuffer.length > 0) {
+        completeAudioRecording = activeSession.audioBuffer;
+        console.log(
+          `[STOP-BG] Retrieved complete audio recording: ${(
+            completeAudioRecording.length /
+            1024 /
+            1024
+          ).toFixed(2)}MB (${completeAudioRecording.length} bytes)`
+        );
+      } else {
+        console.warn(
+          `[STOP-BG] No audio recording available for session ${
+            session._id
+          }. Audio buffer: ${
+            activeSession.audioBuffer?.length || 0
+          } bytes, Chunks: ${activeSession.audioChunkCount || 0}`
+        );
+      }
+    } else {
+      console.warn(
+        `[STOP-BG] No active session found for session ${session._id}. This may happen if WebSocket disconnected before stop endpoint was called.`
+      );
+      console.warn(
+        `[STOP-BG] Available active sessions: ${Array.from(
+          activeSessions.keys()
+        ).join(", ")}`
+      );
+    }
+
+    // Calculate duration (if not already set)
+    const endedAt = session.endedAt ? session.endedAt : new Date();
+    const totalDuration = session.totalDuration
+      ? session.totalDuration
+      : Math.floor((endedAt - session.startedAt) / 1000);
+
+    let summary = null;
+    let completeTranscripts = [];
+    let detectedLanguages = session.metadata?.detectedLanguages || [];
+
+    try {
+      // Transcribe complete audio with OpenAI
+      if (!process.env.OPENAI_API_KEY) {
+        console.error(
+          "[STOP-BG] OPENAI_API_KEY not set - cannot transcribe complete audio"
+        );
+      } else if (completeAudioRecording && completeAudioRecording.length > 0) {
+        console.log(
+          `[STOP-BG] Transcribing complete audio recording for session ${session._id}...`
+        );
+
+        try {
+          const completeTranscription = await transcribeCompleteAudio(
+            completeAudioRecording,
+            {
+              model: "gpt-4o-transcribe-diarize",
+              language: null,
+              sample_rate: 16000,
+            }
+          );
+
+          // Extract detected language
+          if (completeTranscription.language) {
+            detectedLanguages = [completeTranscription.language];
+          }
+
+          // Convert OpenAI transcription to transcript format and save to database
+          if (completeTranscription && completeTranscription.segments) {
+            completeTranscripts = await Promise.all(
+              completeTranscription.segments.map(async (segment) => {
+                let speakerId = null;
+                if (segment.speaker) {
+                  const parsed = parseInt(
+                    segment.speaker.replace("SPEAKER_", ""),
+                    10
+                  );
+                  if (!isNaN(parsed) && isFinite(parsed)) {
+                    speakerId = parsed;
+                  }
+                }
+
+                const transcriptData = {
+                  text: segment.text || "",
+                  timestamp: segment.start
+                    ? new Date(
+                        session.startedAt.getTime() + segment.start * 1000
+                      )
+                    : new Date(),
+                  speaker: speakerId !== null ? `Speaker ${speakerId}` : null,
+                  speakerId: speakerId,
+                  isFinal: true,
+                  metadata: {
+                    confidence: 1.0,
+                    languageCode: completeTranscription.language || null,
+                  },
+                };
+
+                // Save transcript to database
+                const transcriptEntry = new ConversationTranscript({
+                  liveConversation: session._id,
+                  pitchDeck: session.pitchDeck,
+                  timestamp: transcriptData.timestamp,
+                  text: transcriptData.text,
+                  speaker: transcriptData.speaker,
+                  speakerId: transcriptData.speakerId,
+                  isFinal: transcriptData.isFinal,
+                  metadata: transcriptData.metadata,
+                });
+
+                await transcriptEntry.save();
+                return transcriptData;
+              })
+            );
+
+            console.log(
+              `[STOP-BG] Complete audio transcription: ${completeTranscripts.length} segments saved`
+            );
+          } else if (completeTranscription && completeTranscription.text) {
+            // Fallback: single text response
+            const transcriptEntry = new ConversationTranscript({
+              liveConversation: session._id,
+              pitchDeck: session.pitchDeck,
+              timestamp: session.startedAt,
+              text: completeTranscription.text,
+              speaker: null,
+              speakerId: null,
+              isFinal: true,
+              metadata: {
+                confidence: 1.0,
+                languageCode: completeTranscription.language || null,
+              },
+            });
+
+            await transcriptEntry.save();
+
+            completeTranscripts = [
+              {
+                text: completeTranscription.text,
+                timestamp: session.startedAt,
+                speaker: null,
+                speakerId: null,
+                isFinal: true,
+                metadata: {
+                  confidence: 1.0,
+                  languageCode: completeTranscription.language || null,
+                },
+              },
+            ];
+          }
+
+          // Generate summary from complete audio transcription
+          if (completeTranscripts.length > 0) {
+            console.log(
+              "[STOP-BG] Generating meeting summary from complete audio..."
+            );
+            summary = await generateMeetingSummary(
+              session._id.toString(),
+              session.pitchDeck.toString(),
+              completeTranscripts,
+              totalDuration,
+              detectedLanguages
+            );
+            console.log(
+              "[STOP-BG] Meeting summary generated from complete audio."
+            );
+          }
+        } catch (audioError) {
+          console.error(
+            "[STOP-BG] Error transcribing complete audio:",
+            audioError
+          );
+          throw audioError;
+        }
+      } else {
+        console.warn(
+          "[STOP-BG] No audio recording available for transcription"
+        );
+      }
+    } catch (error) {
+      console.error("[STOP-BG] Error generating meeting summary:", error);
+      // Continue even if summary generation fails
+    }
+
+    // Get transcript count
+    const transcriptCount = await ConversationTranscript.countDocuments({
+      liveConversation: session._id,
+    });
+
+    // Clean up active session
+    if (activeSession) {
+      activeSessions.delete(session._id.toString());
+    }
+
+    // Update session with summary and metadata
+    const updatedSession = await LiveConversation.findById(session._id);
+    if (!updatedSession) {
+      return;
+    }
+
+    updatedSession.status = "ENDED";
+    updatedSession.endedAt = endedAt;
+    updatedSession.totalDuration = totalDuration;
+    updatedSession.transcriptCount = transcriptCount;
+
+    if (summary) {
+      updatedSession.summary = {
+        generatedAt: new Date(),
+        content: summary.content,
+        keyTopics: summary.keyTopics || [],
+        participants: summary.participants || [],
+        duration: totalDuration,
+      };
+    }
+
+    if (detectedLanguages.length > 0) {
+      if (!updatedSession.metadata) {
+        updatedSession.metadata = {};
+      }
+      updatedSession.metadata.detectedLanguages = detectedLanguages;
+    }
+
+    await updatedSession.save();
+
+    // Save transcript summary to conversation history
+    try {
+      if (transcriptCount > 0) {
+        const PitchDeckMessage = require("../models/PitchDeckMessage");
+        await PitchDeckMessage.create({
+          pitchDeck: updatedSession.pitchDeck,
+          author: updatedSession.createdBy,
+          organization: updatedSession.organization,
+          userQuery: `[Live Conversation Session: ${
+            updatedSession.title || "Untitled"
+          }]`,
+          attachments: [],
+          aiResponse: {
+            responseType: "conversational",
+            response: {
+              answer: summary
+                ? `Meeting Summary:\n\n${summary.content}\n\nFull transcript available in session details.`
+                : `Live conversation transcript (${transcriptCount} entries, ${totalDuration}s duration). See full transcript for details.`,
+              reference: "live_conversation",
+            },
+          },
+          responseType: "conversational",
+          requiresAnalysisUpdate: false,
+          analysisVersion: 1,
+          metadata: {
+            liveSessionId: updatedSession._id.toString(),
+            transcriptCount: transcriptCount,
+            duration: totalDuration,
+            summaryGenerated: !!summary,
+          },
+        });
+      }
+    } catch (error) {
+      console.error(
+        "[STOP-BG] Error saving transcript to conversation history:",
+        error
+      );
+    }
+
+    console.log(
+      `[STOP-BG] Finished background processing for session ${sessionIdString}`
+    );
+  } catch (error) {
+    console.error("[STOP-BG] Unexpected error in processSessionStop:", error);
+  }
+}
+
+/**
  * Detect speaker name from introduction text
  * @param {string} text - The transcript text
  * @param {number} speakerId - The speaker ID
@@ -833,7 +1144,68 @@ router.get(
 );
 
 /**
+ * Get all live conversation meetings for a specific pitch deck (with summaries)
+ */
+router.get(
+  "/pitch-deck/:pitchDeckId",
+  authMiddleware,
+  requireSAOrAnalyst,
+  async (req, res) => {
+    try {
+      const { pitchDeckId } = req.params;
+
+      // Verify pitch deck exists and user has access
+      const query = {
+        _id: pitchDeckId,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query).lean();
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      const sessions = await LiveConversation.find({
+        pitchDeck: pitchDeckId,
+        organization: req.user.organization._id,
+        isActive: true,
+      })
+        .sort({ startedAt: -1 })
+        .lean();
+
+      res.json({
+        pitchDeck: {
+          id: pitchDeck._id.toString(),
+          title: pitchDeck.title,
+        },
+        meetings: sessions.map((s) => ({
+          id: s._id.toString(),
+          title: s.title,
+          status: s.status,
+          startedAt: s.startedAt,
+          endedAt: s.endedAt,
+          totalDuration: s.totalDuration,
+          transcriptCount: s.transcriptCount,
+          suggestionCount: s.suggestionCount,
+          summary: s.summary || null,
+          detectedLanguages: s.metadata?.detectedLanguages || [],
+        })),
+      });
+    } catch (error) {
+      console.error("Get pitch deck meetings error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+/**
  * Stop a live conversation session
+ * Summary generation is handled in the background so this call returns quickly.
  */
 router.post(
   "/:id/stop",
@@ -859,295 +1231,32 @@ router.post(
         }
       }
 
-      // Get active session and audio buffer
       const sessionIdString = session._id.toString();
-      console.log(`[STOP] Looking up session with ID: ${sessionIdString}`);
       console.log(
-        `[STOP] Available session IDs: ${Array.from(activeSessions.keys()).join(
-          ", "
-        )}`
+        `[STOP] Queueing background processing for session ${sessionIdString}`
       );
 
-      const activeSession = activeSessions.get(sessionIdString);
-      let completeAudioRecording = null;
-
-      console.log(
-        `[STOP] Session ${
-          session._id
-        }: Active session exists: ${!!activeSession}`
-      );
-
-      if (activeSession) {
-        console.log(
-          `[STOP] Audio buffer size: ${
-            activeSession.audioBuffer?.length || 0
-          } bytes, Chunks received: ${activeSession.audioChunkCount || 0}`
-        );
-
-        // Close transcription connection if it exists
-        if (activeSession.transcription?.close) {
-          activeSession.transcription.close();
-        }
-
-        // Get complete audio from our buffer (always maintained)
-        if (activeSession.audioBuffer && activeSession.audioBuffer.length > 0) {
-          completeAudioRecording = activeSession.audioBuffer;
-          console.log(
-            `[STOP] Retrieved complete audio recording: ${(
-              completeAudioRecording.length /
-              1024 /
-              1024
-            ).toFixed(2)}MB (${completeAudioRecording.length} bytes)`
-          );
-        } else {
-          console.warn(
-            `[STOP] No audio recording available for session ${
-              session._id
-            }. Audio buffer: ${
-              activeSession.audioBuffer?.length || 0
-            } bytes, Chunks: ${activeSession.audioChunkCount || 0}`
-          );
-        }
-      } else {
-        console.warn(
-          `[STOP] No active session found for session ${session._id}. This may happen if WebSocket disconnected before stop endpoint was called.`
-        );
-        console.warn(
-          `[STOP] Available active sessions: ${Array.from(
-            activeSessions.keys()
-          ).join(", ")}`
-        );
-      }
-
-      // Calculate duration
-      const endedAt = new Date();
-      const totalDuration = Math.floor((endedAt - session.startedAt) / 1000);
-
-      // Generate comprehensive meeting summary from complete audio analysis
-      let summary = null;
-      let completeTranscripts = [];
-      let detectedLanguages = [];
-
-      try {
-        // Transcribe complete audio with OpenAI
-        if (!process.env.OPENAI_API_KEY) {
-          console.error(
-            "OPENAI_API_KEY not set - cannot transcribe complete audio"
-          );
-        } else if (
-          completeAudioRecording &&
-          completeAudioRecording.length > 0
-        ) {
-          console.log(
-            `Transcribing complete audio recording for session ${session._id}...`
-          );
-
-          try {
-            const completeTranscription = await transcribeCompleteAudio(
-              completeAudioRecording,
-              {
-                model: "gpt-4o-transcribe-diarize",
-                language: null,
-                sample_rate: 16000,
-              }
-            );
-
-            // Extract detected language
-            if (completeTranscription.language) {
-              detectedLanguages = [completeTranscription.language];
-            }
-
-            // Convert OpenAI transcription to transcript format and save to database
-            if (completeTranscription && completeTranscription.segments) {
-              completeTranscripts = await Promise.all(
-                completeTranscription.segments.map(async (segment) => {
-                  let speakerId = null;
-                  if (segment.speaker) {
-                    const parsed = parseInt(
-                      segment.speaker.replace("SPEAKER_", ""),
-                      10
-                    );
-                    if (!isNaN(parsed) && isFinite(parsed)) {
-                      speakerId = parsed;
-                    }
-                  }
-
-                  const transcriptData = {
-                    text: segment.text || "",
-                    timestamp: segment.start
-                      ? new Date(
-                          session.startedAt.getTime() + segment.start * 1000
-                        )
-                      : new Date(),
-                    speaker: speakerId !== null ? `Speaker ${speakerId}` : null,
-                    speakerId: speakerId,
-                    isFinal: true,
-                    metadata: {
-                      confidence: 1.0,
-                      languageCode: completeTranscription.language || null,
-                    },
-                  };
-
-                  // Save transcript to database
-                  const transcriptEntry = new ConversationTranscript({
-                    liveConversation: session._id,
-                    pitchDeck: session.pitchDeck,
-                    timestamp: transcriptData.timestamp,
-                    text: transcriptData.text,
-                    speaker: transcriptData.speaker,
-                    speakerId: transcriptData.speakerId,
-                    isFinal: transcriptData.isFinal,
-                    metadata: transcriptData.metadata,
-                  });
-
-                  await transcriptEntry.save();
-                  return transcriptData;
-                })
-              );
-
-              console.log(
-                `Complete audio transcription: ${completeTranscripts.length} segments saved`
-              );
-            } else if (completeTranscription && completeTranscription.text) {
-              // Fallback: single text response
-              const transcriptEntry = new ConversationTranscript({
-                liveConversation: session._id,
-                pitchDeck: session.pitchDeck,
-                timestamp: session.startedAt,
-                text: completeTranscription.text,
-                speaker: null,
-                speakerId: null,
-                isFinal: true,
-                metadata: {
-                  confidence: 1.0,
-                  languageCode: completeTranscription.language || null,
-                },
-              });
-
-              await transcriptEntry.save();
-
-              completeTranscripts = [
-                {
-                  text: completeTranscription.text,
-                  timestamp: session.startedAt,
-                  speaker: null,
-                  speakerId: null,
-                  isFinal: true,
-                  metadata: {
-                    confidence: 1.0,
-                    languageCode: completeTranscription.language || null,
-                  },
-                },
-              ];
-            }
-
-            // Generate summary from complete audio transcription
-            if (completeTranscripts.length > 0) {
-              console.log("Generating meeting summary from complete audio...");
-              summary = await generateMeetingSummary(
-                session._id.toString(),
-                session.pitchDeck.toString(),
-                completeTranscripts,
-                totalDuration,
-                detectedLanguages
-              );
-              console.log("Meeting summary generated from complete audio.");
-            }
-          } catch (audioError) {
-            console.error("Error transcribing complete audio:", audioError);
-            throw audioError;
-          }
-        } else if (!process.env.OPENAI_API_KEY) {
-          console.error("OPENAI_API_KEY not set - cannot transcribe");
-        } else {
-          console.warn("No audio recording available");
-        }
-      } catch (error) {
-        console.error("Error generating meeting summary:", error);
-        // Continue even if summary generation fails
-      }
-
-      // Get transcript count
-      const transcriptCount = await ConversationTranscript.countDocuments({
-        liveConversation: session._id,
-      });
-
-      // Clean up active session
-      if (activeSession) {
-        activeSessions.delete(session._id.toString());
-      }
-
-      // Update session with summary and metadata
+      // Optimistically mark session as ended; background job will finalize details
       session.status = "ENDED";
-      session.endedAt = endedAt;
-      session.totalDuration = totalDuration;
-      session.transcriptCount = transcriptCount;
-
-      if (summary) {
-        session.summary = {
-          generatedAt: new Date(),
-          content: summary.content,
-          keyTopics: summary.keyTopics || [],
-          participants: summary.participants || [],
-          duration: totalDuration,
-        };
-      }
-
-      if (detectedLanguages.length > 0) {
-        if (!session.metadata) {
-          session.metadata = {};
-        }
-        session.metadata.detectedLanguages = detectedLanguages;
-      }
-
+      session.endedAt = new Date();
+      session.totalDuration = Math.floor(
+        (session.endedAt.getTime() - session.startedAt.getTime()) / 1000
+      );
       await session.save();
 
-      // Save transcript summary to conversation history
-      try {
-        if (transcriptCount > 0) {
-          const PitchDeckMessage = require("../models/PitchDeckMessage");
-          await PitchDeckMessage.create({
-            pitchDeck: session.pitchDeck,
-            author: session.createdBy,
-            organization: session.organization,
-            userQuery: `[Live Conversation Session: ${
-              session.title || "Untitled"
-            }]`,
-            attachments: [],
-            aiResponse: {
-              responseType: "conversational",
-              response: {
-                answer: summary
-                  ? `Meeting Summary:\n\n${summary.content}\n\nFull transcript available in session details.`
-                  : `Live conversation transcript (${transcriptCount} entries, ${totalDuration}s duration). See full transcript for details.`,
-                reference: "live_conversation",
-              },
-            },
-            responseType: "conversational",
-            requiresAnalysisUpdate: false,
-            analysisVersion: 1,
-            metadata: {
-              liveSessionId: session._id.toString(),
-              transcriptCount: transcriptCount,
-              duration: totalDuration,
-              summaryGenerated: !!summary,
-            },
-          });
-        }
-      } catch (error) {
-        console.error(
-          "Error saving transcript to conversation history:",
-          error
-        );
-      }
+      // Kick off background processing
+      setImmediate(() => {
+        processSessionStop(sessionIdString).catch((err) => {
+          console.error("[STOP] Background processing error:", err);
+        });
+      });
 
       res.json({
         sessionId: session._id.toString(),
         endedAt: session.endedAt,
         totalDuration: session.totalDuration,
-        transcriptCount: session.transcriptCount,
-        summary: session.summary || null,
-        detectedLanguages: session.metadata?.detectedLanguages || [],
+        summary: null,
+        summaryPending: true,
       });
     } catch (error) {
       console.error("Stop session error:", error);

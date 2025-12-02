@@ -17,7 +17,11 @@ const fs = require("fs");
 const { tryParseJson, stripCodeFences } = require("../utils/helpers");
 
 const router = express.Router();
-const perplexity = new Perplexity();
+const perplexity = new Perplexity({
+  apiKey: process.env.PERPLEXITY_API_KEY, // if not already set
+  timeout: 600000, // 10 minutes in ms; tweak lower/higher as you like
+  maxRetries: 3,
+});
 
 // Upload pitch deck
 router.post(
@@ -57,23 +61,35 @@ router.post(
 
       await pitchDeck.save();
 
-      // Start AI analysis in background (with base64 file)
-      let updatedPitchDeck = await analyzePitchDeckWithBase64(
-        pitchDeck._id,
-        encodedFile,
-        req.file.originalname,
-        req.file
-      );
+      // Fire-and-forget background AI analysis (with base64 file)
+      const pitchDeckId = pitchDeck._id;
+      const fileName = req.file.originalname;
+      const fileForUpload = req.file;
+
+      setImmediate(() => {
+        analyzePitchDeckWithBase64(
+          pitchDeckId,
+          encodedFile,
+          fileName,
+          fileForUpload
+        ).catch((err) => {
+          console.error(
+            `Background pitch deck analysis failed for ${pitchDeckId}:`,
+            err
+          );
+        });
+      });
 
       res.status(201).json({
-        message: "Pitch deck uploaded and analysis started",
+        message: "Pitch deck uploaded; analysis is running in the background",
         pitchDeck: {
           id: pitchDeck._id,
           title: pitchDeck.title,
           description: pitchDeck.description,
-          // status: pitchDeck.status,
+          status: pitchDeck.status,
           uploadedAt: pitchDeck.createdAt,
-          analysis: updatedPitchDeck,
+          analysis: null,
+          analysisPending: true,
         },
       });
     } catch (error) {
