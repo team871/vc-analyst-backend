@@ -23,6 +23,127 @@ const perplexity = new Perplexity({
   maxRetries: 3,
 });
 
+// Helper: normalize analysis object (clean weird summary formatting, code fences, nested JSON, etc.)
+function normalizeAnalysisObject(analysis) {
+  if (!analysis || typeof analysis !== "object") return analysis;
+  const normalized = { ...analysis };
+
+  // Clean summary field if it's a string containing JSON or code fences
+  if (typeof normalized.summary === "string") {
+    let s = stripCodeFences(normalized.summary || "").trim();
+
+    // If summary itself looks like JSON with a nested "summary", unwrap it
+    const nested = tryParseJson(s);
+    if (nested && typeof nested === "object") {
+      if (typeof nested.summary === "string") {
+        s = nested.summary;
+      } else {
+        // Fallback: if it's JSON but no nested summary, just stringify succinctly
+        s = JSON.stringify(nested);
+      }
+    }
+
+    // Final cleanup of any surrounding single or double quotes
+    s = s.replace(/^['"]+|['"]+$/g, "").trim();
+    normalized.summary = s;
+  }
+
+  return normalized;
+}
+
+// Helper: generate a detailed sector analysis using Perplexity based on the existing pitch deck analysis
+async function generateSectorAnalysisForPitchDeck(pdRecord, baseAnalysis) {
+  try {
+    if (!pdRecord || !baseAnalysis) return null;
+
+    const summary = baseAnalysis.summary || "";
+    const keyPoints = Array.isArray(baseAnalysis.keyPoints)
+      ? baseAnalysis.keyPoints
+      : [];
+    const businessModel = baseAnalysis.businessModel || "";
+    const marketSize = baseAnalysis.marketSize || "";
+
+    const sectorPrompt = `You are DealFlow AI — an AI assistant for Venture Capital analysts.
+
+Your specific task now is to perform a **deep, standalone SECTOR / INDUSTRY ANALYSIS** for a given startup, using **live internet search**.
+
+You are NOT re-analyzing the pitch deck itself. Instead, you are analyzing the broader market/sector in which this startup operates.
+
+Startup context from the pitch deck analysis:
+- Summary: ${summary}
+- Key Points: ${keyPoints.join("; ")}
+- Business Model: ${businessModel}
+- Market Size (from deck): ${marketSize}
+
+Using this context, infer the most relevant sector/subsector for this company and then perform a detailed sector analysis with web search.
+
+Return STRICTLY a JSON object with this structure:
+{
+  "sectorAnalysis": {
+    "sector": "High-level sector name (e.g., Fintech, Digital Health, Climate Tech).",
+    "subSector": "More specific niche if possible (e.g., BNPL, telemedicine, carbon accounting).",
+    "marketTrends": "2-4 paragraphs describing current trends, adoption curves, regulatory dynamics, and key structural shifts in this sector. Use recent data and web sources.",
+    "recentNews": [
+      "3-7 bullet points of very recent news or developments in the sector with 1-line explanation each."
+    ],
+    "competitorNews": [
+      "3-7 bullet points of recent news or updates about notable competitors or comparable companies in this space (funding rounds, launches, exits, regulatory issues, etc.)."
+    ],
+    "regulatoryEnvironment": "Overview of relevant regulations, data privacy / safety rules, and any upcoming regulatory changes that matter for this sector.",
+    "macroTailwinds": [
+      "3-5 bullets on macro trends that help this sector (e.g., digitisation, demographic shifts, AI adoption, etc.)."
+    ],
+    "macroHeadwinds": [
+      "3-5 bullets on macro risks or headwinds (e.g., funding slowdown, regulation, saturation, pricing pressure)."
+    ],
+    "investorSentiment": "Short overview (1-2 paragraphs) of how venture / growth investors currently view this sector (hot / cooling, typical valuation ranges, round dynamics).",
+    "relevantInsights": "Any other important context that would help an investor evaluate this opportunity in the broader market.",
+    "sources": [
+      {
+        "title": "Article or source title",
+        "url": "https://example.com/article",
+        "date": "Publication date if available",
+        "summary": "Brief summary of key information from this source"
+      }
+    ]
+  }
+}
+
+CRITICAL RULES:
+- Use web search heavily to ground your analysis in **current** data.
+- Prefer high-quality sources (consulting reports, industry publications, major tech/business media, regulatory bodies).
+- Include at least 5 distinct sources if possible.
+- Output **valid JSON only**. No markdown, no backticks, no commentary.`;
+
+    const completion = await perplexity.chat.completions.create({
+      model: "sonar-pro",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: sectorPrompt,
+            },
+          ],
+        },
+      ],
+    });
+
+    const sectorText = completion.choices[0].message.content;
+    const parsed = tryParseJson(sectorText);
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+
+    const sectorAnalysis = parsed.sectorAnalysis || parsed;
+    return sectorAnalysis;
+  } catch (error) {
+    console.error("Sector analysis generation error:", error);
+    return null;
+  }
+}
+
 // Upload pitch deck
 router.post(
   "/upload",
@@ -143,9 +264,8 @@ Input: A pitch deck (PDF) and optional analyst comments.
 Output: A single JSON object — concise, factual, and well-structured.
 
 Rules:
-• Extract insights only from the pitch deck — no external data or assumptions (EXCEPT for sectorAnalysis).
-• For the "sectorAnalysis" section ONLY: You MUST use internet search to find current market trends, recent news, competitor updates, and relevant sector information. Include proper sources with URLs.
-• For all other sections: Base your analysis strictly on the pitch deck content provided.
+• Extract insights only from the pitch deck — no external data or assumptions.
+• Do NOT perform external web search in this step; focus purely on deck content.
 • If information is missing, mark as "unknown" and briefly note what's missing.
 • Be objective, evidence-based, and avoid speculation or hype.
 • Summaries must be concise yet capture key strategic and financial details.
@@ -168,22 +288,6 @@ Return this JSON structure:
   "opportunities": ["List 3-5 growth opportunities or strengths."],
   "recommendation": "One of: 'Pass', 'Request More Info', 'Schedule Meeting', or 'Proceed to Diligence'. Include 1-line rationale.",
   "confidenceScore": 1-10,
-
-  "sectorAnalysis": {
-    "marketTrends": "Current trends in the sector/industry relevant to this startup (e.g., adoption rates, regulatory changes, technological shifts). Source information from the internet.",
-    "recentNews": ["List of 3-5 recent news items or developments in the sector with brief descriptions."],
-    "competitorNews": ["Any recent news or updates about competitors mentioned in the deck or known in the space."],
-    "relevantInsights": "Other important market context, investor sentiment, or industry dynamics that could impact this opportunity.",
-    "sources": [
-      {
-        "title": "Article or source title",
-        "url": "https://example.com/article",
-        "date": "Publication date if available",
-        "summary": "Brief summary of key information from this source"
-      }
-    ]
-  },
-
   "fitAssessment": {
     "overallFit": "STRONG | PARTIAL | WEAK",
     "rationale": "Explain main reasons for this fit rating.",
@@ -269,13 +373,6 @@ ${
         opportunities: ["See detailed analysis"],
         recommendation: "See detailed analysis",
         confidenceScore: 7,
-        sectorAnalysis: {
-          marketTrends: "Analysis not available due to parsing error",
-          recentNews: [],
-          competitorNews: [],
-          relevantInsights: "Analysis not available due to parsing error",
-          sources: [],
-        },
         fitAssessment: {
           overallFit: latestThesis ? "PARTIAL" : "UNKNOWN",
           rationale: latestThesis
@@ -295,6 +392,18 @@ ${
           openQuestions: [],
         },
       };
+    }
+
+    // Normalize analysis (fix weird summary formatting, nested JSON, code fences, etc.)
+    analysis = normalizeAnalysisObject(analysis);
+
+    // Generate separate, detailed sector analysis using web search
+    const sectorAnalysis = await generateSectorAnalysisForPitchDeck(
+      pdRecord,
+      analysis
+    );
+    if (sectorAnalysis) {
+      analysis.sectorAnalysis = sectorAnalysis;
     }
 
     const endTime = Date.now();
@@ -421,6 +530,76 @@ router.get("/", authMiddleware, requireSAOrAnalyst, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
+// Get sector analysis for a specific pitch deck (optionally recompute with ?refresh=true)
+router.get(
+  "/:id/sector-analysis",
+  authMiddleware,
+  requireSAOrAnalyst,
+  async (req, res) => {
+    try {
+      const query = {
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      // Analysts can only see their own pitch decks
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query);
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      let sectorAnalysis =
+        pitchDeck.analysis && pitchDeck.analysis.sectorAnalysis
+          ? pitchDeck.analysis.sectorAnalysis
+          : null;
+
+      const shouldRefresh =
+        req.query.refresh && String(req.query.refresh).toLowerCase() === "true";
+
+      // If missing or refresh requested and we have a base analysis, recompute
+      if ((!sectorAnalysis || shouldRefresh) && pitchDeck.analysis) {
+        const baseAnalysis = normalizeAnalysisObject(
+          pitchDeck.analysis.toObject
+            ? pitchDeck.analysis.toObject()
+            : pitchDeck.analysis
+        );
+        const newSector = await generateSectorAnalysisForPitchDeck(
+          pitchDeck,
+          baseAnalysis
+        );
+        if (newSector) {
+          sectorAnalysis = newSector;
+          await PitchDeck.findByIdAndUpdate(pitchDeck._id, {
+            $set: {
+              "analysis.sectorAnalysis": sectorAnalysis,
+            },
+          });
+        }
+      }
+
+      if (!sectorAnalysis) {
+        return res.status(404).json({
+          message:
+            "Sector analysis not available yet. Run initial analysis first or try again later.",
+        });
+      }
+
+      res.json({
+        pitchDeckId: pitchDeck._id.toString(),
+        sectorAnalysis,
+      });
+    } catch (error) {
+      console.error("Get sector analysis error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
 
 // Get live sessions for a pitch deck
 router.get(
@@ -1119,7 +1298,8 @@ Your response MUST be a JSON object with this structure:
     "confirmation": "Brief message confirming what edits were made (e.g., 'Fixed spelling errors in summary and keyPoints[2]')"
     
     // IF responseType is "full_analysis":
-    // Include the FULL structured analysis (summary, keyPoints, marketSize, businessModel, etc.)
+    // Include the FULL structured analysis (summary, keyPoints, marketSize, businessModel, etc.).
+    // You may optionally include an updated "sectorAnalysis" field, but sector analysis is generally handled by a separate, dedicated process.
   }
 }
 
@@ -1127,7 +1307,7 @@ Rules:
 • Default to "conversational" unless there's clear reason for full re-analysis or minor edits
 • For "conversational", give direct answers - don't repeat the entire analysis
 • For "minor_edit", provide specific edits with exact paths and values - only edit what was requested
-• For "full_analysis", use internet search for sectorAnalysis section
+• For "full_analysis", you may update the full structured analysis, but detailed sector analysis is typically obtained via a separate sectorAnalysis process (no need to run heavy web search here).
 • Be objective, evidence-based, and avoid speculation
 • If uncertain, choose "conversational" and offer to do full re-analysis if needed
 
@@ -1216,7 +1396,8 @@ ${
 
     // Handle full analysis update
     if (shouldIncrementVersion) {
-      const fullAnalysis = aiResponse.response;
+      // Normalize full analysis before saving (fix any weird summary formatting)
+      const fullAnalysis = normalizeAnalysisObject(aiResponse.response || {});
 
       // Save to history
       const analysisRecord = {
