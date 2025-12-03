@@ -38,8 +38,8 @@ const pitchDeckSchema = new mongoose.Schema(
       team: String,
       // Can be an object (parsed) or string (fallback)
       financials: mongoose.Schema.Types.Mixed,
-      risks: [mongoose.Schema.Types.Mixed], // Can be strings or objects
-      opportunities: [mongoose.Schema.Types.Mixed], // Can be strings or objects
+      risks: [String],
+      opportunities: [String],
       recommendation: String,
       confidenceScore: Number,
       // Sector analysis with internet-sourced information

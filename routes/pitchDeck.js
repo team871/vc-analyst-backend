@@ -23,24 +23,6 @@ const perplexity = new Perplexity({
   maxRetries: 3,
 });
 
-// Helper: normalize opportunity/risk object to string
-function normalizeOpportunityOrRisk(item) {
-  if (typeof item === "string") {
-    return item;
-  }
-  if (typeof item === "object" && item !== null) {
-    // Convert structured object to readable string
-    const parts = [];
-    if (item.category) parts.push(`[${item.category}]`);
-    if (item.opportunity) parts.push(item.opportunity);
-    if (item.risk) parts.push(item.risk);
-    if (item.description) parts.push(item.description);
-    if (item.impact) parts.push(`Impact: ${item.impact}`);
-    return parts.join(" - ");
-  }
-  return String(item);
-}
-
 // Helper: normalize analysis object (clean weird summary formatting, code fences, nested JSON, etc.)
 function normalizeAnalysisObject(analysis) {
   if (!analysis || typeof analysis !== "object") return analysis;
@@ -64,18 +46,6 @@ function normalizeAnalysisObject(analysis) {
     // Final cleanup of any surrounding single or double quotes
     s = s.replace(/^['"]+|['"]+$/g, "").trim();
     normalized.summary = s;
-  }
-
-  // Normalize opportunities array (convert objects to strings)
-  if (Array.isArray(normalized.opportunities)) {
-    normalized.opportunities = normalized.opportunities.map(
-      normalizeOpportunityOrRisk
-    );
-  }
-
-  // Normalize risks array (convert objects to strings)
-  if (Array.isArray(normalized.risks)) {
-    normalized.risks = normalized.risks.map(normalizeOpportunityOrRisk);
   }
 
   return normalized;
@@ -1271,8 +1241,149 @@ async function reanalyzeWithContext(
     const hasAttachments = newAttachments.length > 0;
     const userMessageContent = currentUserMessage;
 
-    // Build enhanced prompt with conversation history
-    const enhancedPrompt = `You are DealFlow AI — an AI assistant for Venture Capital analysts.
+    // For full re-analysis, use similar prompt structure as analyzePitchDeckWithBase64
+    // For conversational/minor_edit, use the enhanced prompt with response types
+    const needsFullReanalysis =
+      hasAttachments ||
+      currentUserMessage
+        .toLowerCase()
+        .match(/reanalyze|re-analyze|update.*analysis|full.*analysis/i);
+
+    let completion;
+    let analysisText;
+
+    if (needsFullReanalysis) {
+      // Full re-analysis: Use similar prompt structure as analyzePitchDeckWithBase64
+      const fullAnalysisPrompt = `You are DealFlow AI — an AI assistant for Venture Capital analysts.
+
+Your job: Analyze startup pitch decks and produce a structured, investment-grade Pre-Read report focused on (a) understanding the business.
+
+Input: A pitch deck (PDF) and optional analyst comments or new information.
+Output: A single JSON object — concise, factual, and well-structured.
+
+CURRENT ANALYSIS (Version ${pitchDeck.analysisVersion}):
+This is the existing analysis. Update it based on new information provided.
+${currentAnalysisJson}
+
+CONVERSATION HISTORY:
+${conversationContext}
+${supportingDocsContext}
+
+NEW INFORMATION:
+${userMessageContent || "No new message provided"}
+${hasAttachments ? "New files/documents have been attached." : ""}
+
+Rules:
+• Extract insights from the pitch deck and any new information provided — no external data or assumptions.
+• Do NOT perform external web search in this step; focus purely on deck content and provided information.
+• If information is missing, mark as "unknown" and briefly note what's missing.
+• Be objective, evidence-based, and avoid speculation or hype.
+• Summaries must be concise yet capture key strategic and financial details.
+• Update the analysis based on new information while preserving accurate existing data.
+
+Return this JSON structure:
+
+{
+  "summary": "Overall description of what the startup does and its core value proposition (2-3 sentences).",
+  "keyPoints": ["3-6 bullets of important takeaways about problem, solution, traction, team, etc."],
+  "marketSize": "Quantify TAM/SAM/SOM if given; else describe qualitatively or mark 'unknown'.",
+  "businessModel": "How the company makes money; pricing type and customer segment.",
+  "competitiveAdvantage": "Summarize differentiators, defensibility, or moat.",
+  "team": "Founders, experience, credibility signals, and team gaps.",
+  "financials": {
+    "traction": "Revenue, users, MRR, growth — or 'unknown'.",
+    "fundraising": "Ask amount and intended use of funds.",
+    "unitEconomics": "CAC/LTV/gross margin if given — else 'unknown'."
+  },
+  "risks": ["List key risks or red flags found in deck."],
+  "opportunities": ["List 3-5 growth opportunities or strengths."],
+  "recommendation": "One of: 'Pass', 'Request More Info', 'Schedule Meeting', or 'Proceed to Diligence'. Include 1-line rationale.",
+  "confidenceScore": 1-10,
+  "fitAssessment": {
+    "overallFit": "STRONG | PARTIAL | WEAK",
+    "rationale": "Explain main reasons for this fit rating.",
+    "alignment": {
+      "sectors": [{ "match": true/false, "details": "text or 'unknown'" }],
+      "stage": [{ "match": true/false, "details": "text or 'unknown'" }],
+      "geography": [{ "match": true/false, "details": "text or 'unknown'" }],
+      "checkSize": { "match": true/false, "details": "text or 'unknown'" },
+      "ownershipTargets": { "match": true/false, "details": "text or 'unknown'" },
+      "timeHorizon": { "match": true/false, "details": "text or 'unknown'" },
+      "returnTargets": { "match": true/false, "details": "text or 'unknown'" },
+      "riskTolerance": { "match": true/false, "details": "text or 'unknown'" },
+      "constraintsAndExclusions": [{ "violated": true/false, "details": "text or 'unknown'" }]
+    },
+    "openQuestions": ["Top 5 questions the analyst should ask to validate assumptions."]
+  }
+}
+
+Keep tone professional, clear, and investor-grade. Output valid JSON only.
+
+Firm thesis (JSON below). Use it strictly to assess fit; do not alter it.
+${
+  latestThesis && latestThesis.profile
+    ? JSON.stringify(latestThesis.profile)
+    : latestThesis && latestThesis.content
+    ? String(latestThesis.content)
+    : "No firm thesis available."
+}`;
+
+      // Build message content array (text + any new file attachments)
+      const messageContent = [
+        {
+          type: "text",
+          text: fullAnalysisPrompt,
+        },
+      ];
+
+      // Add any newly attached files to the AI message
+      for (const attachment of newAttachments) {
+        messageContent.push({
+          type: "file_url",
+          file_url: {
+            url: attachment.encodedFile,
+          },
+          file_name: attachment.fileName,
+        });
+      }
+
+      // Generate AI analysis using Perplexity with retries (similar to analyzePitchDeckWithBase64)
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      async function callPerplexityWithRetry(maxAttempts = 3) {
+        let lastError;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            return await perplexity.chat.completions.create({
+              model: "sonar-pro",
+              messages: [
+                {
+                  role: "user",
+                  content: messageContent,
+                },
+              ],
+            });
+          } catch (err) {
+            console.log(err);
+            lastError = err;
+            const status = err && err.status ? err.status : 0;
+            // Retry on transient provider/network errors (5xx or connection issues)
+            if (status >= 500 || status === 0) {
+              const backoffMs =
+                attempt === 1 ? 1000 : attempt === 2 ? 3000 : 7000;
+              await sleep(backoffMs);
+              continue;
+            }
+            throw err;
+          }
+        }
+        throw lastError;
+      }
+
+      completion = await callPerplexityWithRetry(3);
+      analysisText = completion.choices[0].message.content;
+    } else {
+      // Conversational or minor edit: Use enhanced prompt with response types
+      const enhancedPrompt = `You are DealFlow AI — an AI assistant for Venture Capital analysts.
 
 This is a FOLLOW-UP interaction. The analyst has asked a question or provided new information.
 
@@ -1299,16 +1410,10 @@ You must first determine the appropriate response type:
    - Changes are localized to specific fields (e.g., "Fix the typo in the summary", "Update the company name to 'Acme Corp'")
    - Examples: "Fix spelling in summary", "Change 'startup' to 'company' in keyPoints", "Correct the revenue number to $5M"
 
-3. **FULL_ANALYSIS** - Use when:
-   - New files/documents are attached
-   - Analyst explicitly requests re-analysis or update
-   - Analyst provides significant new information that changes the evaluation
-   - Examples: "Update the analysis", "Reanalyze with this new data", "Here are the financials, update projections"
-
 Your response MUST be a JSON object with this structure:
 
 {
-  "responseType": "conversational" | "minor_edit" | "full_analysis",
+  "responseType": "conversational" | "minor_edit",
   "requiresAnalysisUpdate": true | false,
   "rationale": "Brief explanation of why you chose this response type",
   "response": {
@@ -1326,97 +1431,142 @@ Your response MUST be a JSON object with this structure:
       }
     ],
     "confirmation": "Brief message confirming what edits were made (e.g., 'Fixed spelling errors in summary and keyPoints[2]')"
-    
-    // IF responseType is "full_analysis":
-    // Include the FULL structured analysis (summary, keyPoints, marketSize, businessModel, etc.).
-    // You may optionally include an updated "sectorAnalysis" field, but sector analysis is generally handled by a separate, dedicated process.
   }
 }
 
 Rules:
-• Default to "conversational" unless there's clear reason for full re-analysis or minor edits
+• Default to "conversational" unless there's clear reason for minor edits
 • For "conversational", give direct answers - don't repeat the entire analysis
 • For "minor_edit", provide specific edits with exact paths and values - only edit what was requested
-• For "full_analysis", you may update the full structured analysis, but detailed sector analysis is typically obtained via a separate sectorAnalysis process (no need to run heavy web search here).
 • Be objective, evidence-based, and avoid speculation
 • If uncertain, choose "conversational" and offer to do full re-analysis if needed
 
-Current analyst message: "${userMessageContent}"
-New files attached: ${hasAttachments ? "Yes" : "No"}
+Current analyst message: "${userMessageContent}"`;
 
-Firm thesis (for fit assessment - only needed for full_analysis):
-${
-  latestThesis && latestThesis.profile
-    ? JSON.stringify(latestThesis.profile)
-    : latestThesis && latestThesis.content
-    ? String(latestThesis.content)
-    : "No firm thesis available."
-}`;
-
-    // Build message content array (text + any new file attachments)
-    const messageContent = [
-      {
-        type: "text",
-        text: enhancedPrompt,
-      },
-    ];
-
-    // Add any newly attached files to the AI message
-    for (const attachment of newAttachments) {
-      messageContent.push({
-        type: "file_url",
-        file_url: {
-          url: attachment.encodedFile,
-        },
-        file_name: attachment.fileName,
-      });
-    }
-
-    // Call Perplexity with updated context
-    const completion = await perplexity.chat.completions.create({
-      model: "sonar-pro",
-      messages: [
+      // Build message content array (text + any new file attachments)
+      const messageContent = [
         {
-          role: "user",
-          content: messageContent,
+          type: "text",
+          text: enhancedPrompt,
         },
-      ],
-    });
+      ];
 
-    const analysisText = completion.choices[0].message.content;
+      // Add any newly attached files to the AI message
+      for (const attachment of newAttachments) {
+        messageContent.push({
+          type: "file_url",
+          file_url: {
+            url: attachment.encodedFile,
+          },
+          file_name: attachment.fileName,
+        });
+      }
+
+      // Call Perplexity with updated context
+      completion = await perplexity.chat.completions.create({
+        model: "sonar-pro",
+        messages: [
+          {
+            role: "user",
+            content: messageContent,
+          },
+        ],
+      });
+
+      analysisText = completion.choices[0].message.content;
+    }
 
     const parsed = tryParseJson(analysisText);
     const endTime = Date.now();
     const analysisDuration = endTime - startTime;
 
     let aiResponse = {};
-    let responseType = "conversational";
+    let responseType = needsFullReanalysis ? "full_analysis" : "conversational";
     let requiresAnalysisUpdate = false;
 
-    // Parse the AI response to determine type
-    if (parsed && typeof parsed === "object" && parsed.responseType) {
-      responseType = parsed.responseType;
-      requiresAnalysisUpdate = parsed.requiresAnalysisUpdate || false;
-      aiResponse = parsed;
-    } else {
-      // Fallback: if parsing fails or old format, treat as conversational
-      const text = stripCodeFences(analysisText) || "";
+    // Parse the AI response based on type
+    if (needsFullReanalysis) {
+      // Full re-analysis: Response should be direct analysis object (like analyzePitchDeckWithBase64)
+      let analysis;
+      if (parsed && typeof parsed === "object") {
+        analysis = parsed;
+      } else {
+        // If JSON parsing fails, create structured analysis from text (similar to analyzePitchDeckWithBase64)
+        const text = stripCodeFences(analysisText) || "";
+        analysis = {
+          summary: text.substring(0, 500),
+          keyPoints: text
+            .split("\n")
+            .filter((line) => line.trim().startsWith("-"))
+            .map((line) => line.replace(/^ -?\s*/, "")),
+          marketSize: "Analysis available in summary",
+          businessModel: "Analysis available in summary",
+          competitiveAdvantage: "Analysis available in summary",
+          team: "Analysis available in summary",
+          financials: {
+            traction: "Analysis available in summary",
+            fundraising: "Analysis available in summary",
+            unitEconomics: "Analysis available in summary",
+          },
+          risks: ["See detailed analysis"],
+          opportunities: ["See detailed analysis"],
+          recommendation: "See detailed analysis",
+          confidenceScore: 7,
+          fitAssessment: {
+            overallFit: latestThesis ? "PARTIAL" : "UNKNOWN",
+            rationale: latestThesis
+              ? "Heuristic fallback fit due to non-JSON AI response. Review manually."
+              : "No thesis available to assess fit.",
+            alignment: {
+              sectors: [],
+              stage: [],
+              geography: [],
+              checkSize: { match: false, details: "Unknown" },
+              ownershipTargets: { match: false, details: "Unknown" },
+              timeHorizon: { match: false, details: "Unknown" },
+              returnTargets: { match: false, details: "Unknown" },
+              riskTolerance: { match: false, details: "Unknown" },
+              constraintsAndExclusions: [],
+            },
+            openQuestions: [],
+          },
+        };
+      }
+
+      // Normalize analysis (fix weird summary formatting, nested JSON, code fences, etc.)
+      analysis = normalizeAnalysisObject(analysis);
+
+      // Wrap in response structure for consistency
       aiResponse = {
-        responseType: "conversational",
-        requiresAnalysisUpdate: false,
-        rationale: "Parsing fallback - treating as conversational response",
-        response: {
-          // answer: text.substring(0, 500),
-          answer: text,
-          reference: "general",
-          suggestedFollowUp: [],
-        },
+        responseType: "full_analysis",
+        requiresAnalysisUpdate: true,
+        rationale: "Full re-analysis requested with new information",
+        response: analysis,
       };
+    } else {
+      // Conversational or minor edit: Parse response type structure
+      if (parsed && typeof parsed === "object" && parsed.responseType) {
+        responseType = parsed.responseType;
+        requiresAnalysisUpdate = parsed.requiresAnalysisUpdate || false;
+        aiResponse = parsed;
+      } else {
+        // Fallback: if parsing fails or old format, treat as conversational
+        const text = stripCodeFences(analysisText) || "";
+        aiResponse = {
+          responseType: "conversational",
+          requiresAnalysisUpdate: false,
+          rationale: "Parsing fallback - treating as conversational response",
+          response: {
+            answer: text,
+            reference: "general",
+            suggestedFollowUp: [],
+          },
+        };
+      }
     }
 
     // Determine actual version increment
     const shouldIncrementVersion = responseType === "full_analysis";
-    // requiresAnalysisUpdate && responseType === "full_analysis";
     const isMinorEdit = responseType === "minor_edit";
     const actualVersion = shouldIncrementVersion
       ? newVersion
@@ -1426,8 +1576,13 @@ ${
 
     // Handle full analysis update
     if (shouldIncrementVersion) {
-      // Normalize full analysis before saving (fix any weird summary formatting)
-      const fullAnalysis = normalizeAnalysisObject(aiResponse.response || {});
+      // Get the full analysis from response (already normalized above)
+      const fullAnalysis = aiResponse.response || {};
+
+      // Preserve existing sectorAnalysis if it exists (sector analysis is handled separately)
+      if (currentAnalysis.sectorAnalysis) {
+        fullAnalysis.sectorAnalysis = currentAnalysis.sectorAnalysis;
+      }
 
       // Save to history
       const analysisRecord = {
