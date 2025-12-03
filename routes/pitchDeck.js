@@ -23,6 +23,24 @@ const perplexity = new Perplexity({
   maxRetries: 3,
 });
 
+// Helper: normalize opportunity/risk object to string
+function normalizeOpportunityOrRisk(item) {
+  if (typeof item === "string") {
+    return item;
+  }
+  if (typeof item === "object" && item !== null) {
+    // Convert structured object to readable string
+    const parts = [];
+    if (item.category) parts.push(`[${item.category}]`);
+    if (item.opportunity) parts.push(item.opportunity);
+    if (item.risk) parts.push(item.risk);
+    if (item.description) parts.push(item.description);
+    if (item.impact) parts.push(`Impact: ${item.impact}`);
+    return parts.join(" - ");
+  }
+  return String(item);
+}
+
 // Helper: normalize analysis object (clean weird summary formatting, code fences, nested JSON, etc.)
 function normalizeAnalysisObject(analysis) {
   if (!analysis || typeof analysis !== "object") return analysis;
@@ -46,6 +64,18 @@ function normalizeAnalysisObject(analysis) {
     // Final cleanup of any surrounding single or double quotes
     s = s.replace(/^['"]+|['"]+$/g, "").trim();
     normalized.summary = s;
+  }
+
+  // Normalize opportunities array (convert objects to strings)
+  if (Array.isArray(normalized.opportunities)) {
+    normalized.opportunities = normalized.opportunities.map(
+      normalizeOpportunityOrRisk
+    );
+  }
+
+  // Normalize risks array (convert objects to strings)
+  if (Array.isArray(normalized.risks)) {
+    normalized.risks = normalized.risks.map(normalizeOpportunityOrRisk);
   }
 
   return normalized;
@@ -359,7 +389,7 @@ ${
       // If JSON parsing fails, create structured analysis from text
       const text = stripCodeFences(analysisText) || "";
       analysis = {
-        summary: text.substring(0, 500),
+        summary: text,
         keyPoints: text
           .split("\n")
           .filter((line) => line.trim().startsWith("-"))

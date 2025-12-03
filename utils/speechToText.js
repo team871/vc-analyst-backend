@@ -252,8 +252,192 @@ function createLiveTranscription(options = {}, onTranscript, onError) {
 }
 
 /**
+ * Split PCM audio buffer into chunks that will be under 25MB when converted to WAV
+ * @param {Buffer} pcmBuffer - PCM audio data
+ * @param {number} sampleRate - Sample rate (default: 16000)
+ * @returns {Array<Buffer>} Array of PCM chunks
+ */
+function splitPcmIntoChunks(pcmBuffer, sampleRate = 16000) {
+  // WAV header is 44 bytes
+  // Target max WAV size: 20MB (safe margin under 25MB limit)
+  const MAX_WAV_SIZE = 20 * 1024 * 1024; // 20MB
+  const WAV_HEADER_SIZE = 44;
+  const MAX_PCM_SIZE_PER_CHUNK = MAX_WAV_SIZE - WAV_HEADER_SIZE;
+
+  const chunks = [];
+  let offset = 0;
+
+  while (offset < pcmBuffer.length) {
+    const remaining = pcmBuffer.length - offset;
+    const chunkSize = Math.min(remaining, MAX_PCM_SIZE_PER_CHUNK);
+    const chunk = pcmBuffer.slice(offset, offset + chunkSize);
+    chunks.push(chunk);
+    offset += chunkSize;
+  }
+
+  return chunks;
+}
+
+/**
+ * Transcribe a single audio chunk
+ * @param {Buffer} pcmChunk - PCM audio chunk
+ * @param {Object} options - Configuration options
+ * @returns {Promise<Object>} Transcription result
+ */
+async function transcribeAudioChunk(pcmChunk, options = {}) {
+  const client = initializeOpenAI();
+
+  const {
+    model = "gpt-4o-transcribe-diarize",
+    language = null,
+    sample_rate = 16000,
+  } = options;
+
+  const wavBuffer = pcmToWav(pcmChunk, sample_rate);
+
+  const fs = require("fs");
+  const path = require("path");
+  const os = require("os");
+  let audioFile;
+  let tempFilePath = null;
+
+  if (typeof File !== "undefined" && typeof Blob !== "undefined") {
+    try {
+      const blob = new Blob([wavBuffer], { type: "audio/wav" });
+      audioFile = new File([blob], "audio-chunk.wav", {
+        type: "audio/wav",
+        lastModified: Date.now(),
+      });
+    } catch (err) {
+      console.warn("File API creation failed, using temp file:", err.message);
+    }
+  }
+
+  if (!audioFile) {
+    const tempDir = os.tmpdir();
+    tempFilePath = path.join(
+      tempDir,
+      `openai-audio-chunk-${Date.now()}-${Math.random()
+        .toString(36)
+        .substring(7)}.wav`
+    );
+
+    fs.writeFileSync(tempFilePath, wavBuffer);
+
+    const fileStream = fs.createReadStream(tempFilePath);
+    fileStream.name = "audio-chunk.wav";
+    fileStream.path = tempFilePath;
+    fileStream.type = "audio/wav";
+
+    audioFile = fileStream;
+  }
+
+  try {
+    const requestParams = {
+      file: audioFile,
+      model: model,
+      language: language || undefined,
+    };
+
+    if (model.includes("diarize")) {
+      requestParams.response_format = "diarized_json";
+      requestParams.chunking_strategy = "auto";
+      requestParams.timestamp_granularities = ["segment"];
+    } else {
+      requestParams.response_format = "verbose_json";
+    }
+
+    const transcription = await client.audio.transcriptions.create(requestParams);
+    return transcription;
+  } finally {
+    if (tempFilePath) {
+      try {
+        if (fs.existsSync(tempFilePath)) {
+          fs.unlinkSync(tempFilePath);
+        }
+      } catch (err) {
+        console.warn("Failed to cleanup temp file:", err);
+      }
+    }
+  }
+}
+
+/**
+ * Merge transcription results from multiple chunks
+ * @param {Array<Object>} chunkResults - Array of transcription results from chunks
+ * @param {Array<Buffer>} pcmChunks - Original PCM chunks (to calculate accurate durations)
+ * @param {number} sampleRate - Sample rate
+ * @returns {Object} Merged transcription result
+ */
+function mergeTranscriptionChunks(chunkResults, pcmChunks, sampleRate = 16000) {
+  if (chunkResults.length === 0) {
+    return null;
+  }
+
+  if (chunkResults.length === 1) {
+    return chunkResults[0];
+  }
+
+  // Calculate duration per chunk in seconds based on PCM buffer size
+  // PCM: 16-bit = 2 bytes per sample, mono = 1 channel
+  // So: bytes per second = sample_rate * 2
+  const bytesPerSecond = sampleRate * 2;
+
+  const mergedSegments = [];
+  let cumulativeOffset = 0;
+
+  for (let i = 0; i < chunkResults.length; i++) {
+    const chunkResult = chunkResults[i];
+    
+    // Calculate actual chunk duration from PCM buffer size
+    const chunkDuration = pcmChunks[i]
+      ? pcmChunks[i].length / bytesPerSecond
+      : chunkResult.duration || 0;
+
+    if (chunkResult.segments && Array.isArray(chunkResult.segments)) {
+      for (const segment of chunkResult.segments) {
+        // Adjust timestamps to account for previous chunks
+        mergedSegments.push({
+          ...segment,
+          start: segment.start + cumulativeOffset,
+          end: segment.end + cumulativeOffset,
+        });
+      }
+    } else if (chunkResult.text) {
+      // Fallback: if no segments, create a segment from text
+      mergedSegments.push({
+        text: chunkResult.text,
+        start: cumulativeOffset,
+        end: cumulativeOffset + chunkDuration,
+        speaker: null,
+      });
+    }
+
+    // Update cumulative offset based on actual chunk duration
+    cumulativeOffset += chunkDuration;
+  }
+
+  // Build merged result
+  const firstResult = chunkResults[0];
+  const merged = {
+    text: chunkResults.map((r) => r.text || "").join(" ").trim(),
+    language: firstResult.language || null,
+    duration: cumulativeOffset,
+    segments: mergedSegments,
+  };
+
+  // Preserve other fields from first result
+  if (firstResult.words) {
+    merged.words = firstResult.words;
+  }
+
+  return merged;
+}
+
+/**
  * Transcribe complete audio file using OpenAI
  * Used for end-of-meeting complete analysis with speaker diarization
+ * Automatically handles chunking for files over 25MB
  * @param {Buffer} audioBuffer - Complete audio recording (PCM format)
  * @param {Object} options - Configuration options
  * @returns {Promise<Object>} Complete transcription with segments and speaker information
@@ -269,94 +453,146 @@ async function transcribeCompleteAudio(audioBuffer, options = {}) {
 
   try {
     const wavBuffer = pcmToWav(audioBuffer, sample_rate);
+    const fileSizeMB = wavBuffer.length / 1024 / 1024;
 
-    if (wavBuffer.length > 25 * 1024 * 1024) {
-      throw new Error(
-        `Audio file too large: ${(wavBuffer.length / 1024 / 1024).toFixed(
-          2
-        )}MB (max 25MB)`
-      );
-    }
+    console.log(
+      `Audio file size: ${fileSizeMB.toFixed(2)}MB (max 25MB per chunk)`
+    );
 
-    const fs = require("fs");
-    const path = require("path");
-    const os = require("os");
-    let audioFile;
-    let tempFilePath = null;
+    // If file is small enough, transcribe directly
+    if (wavBuffer.length <= 25 * 1024 * 1024) {
+      const fs = require("fs");
+      const path = require("path");
+      const os = require("os");
+      let audioFile;
+      let tempFilePath = null;
 
-    if (typeof File !== "undefined" && typeof Blob !== "undefined") {
-      try {
-        const blob = new Blob([wavBuffer], { type: "audio/wav" });
-        audioFile = new File([blob], "meeting-audio.wav", {
-          type: "audio/wav",
-          lastModified: Date.now(),
-        });
-      } catch (err) {
-        console.warn("File API creation failed, using temp file:", err.message);
+      if (typeof File !== "undefined" && typeof Blob !== "undefined") {
+        try {
+          const blob = new Blob([wavBuffer], { type: "audio/wav" });
+          audioFile = new File([blob], "meeting-audio.wav", {
+            type: "audio/wav",
+            lastModified: Date.now(),
+          });
+        } catch (err) {
+          console.warn("File API creation failed, using temp file:", err.message);
+        }
       }
+
+      if (!audioFile) {
+        const tempDir = os.tmpdir();
+        tempFilePath = path.join(
+          tempDir,
+          `openai-complete-audio-${Date.now()}-${Math.random()
+            .toString(36)
+            .substring(7)}.wav`
+        );
+
+        fs.writeFileSync(tempFilePath, wavBuffer);
+
+        const fileStream = fs.createReadStream(tempFilePath);
+        fileStream.name = "meeting-audio.wav";
+        fileStream.path = tempFilePath;
+        fileStream.type = "audio/wav";
+
+        audioFile = fileStream;
+      }
+
+      let transcription;
+      try {
+        console.log(
+          `Transcribing complete audio file (${fileSizeMB.toFixed(2)}MB)...`
+        );
+
+        // Build request parameters
+        const requestParams = {
+          file: audioFile,
+          model: model,
+          language: language || undefined,
+        };
+
+        // For diarization models, chunking_strategy is REQUIRED
+        // According to OpenAI docs, chunking_strategy should be a string "auto", not an object
+        if (model.includes("diarize")) {
+          requestParams.response_format = "diarized_json";
+          requestParams.chunking_strategy = "auto";
+          requestParams.timestamp_granularities = ["segment"];
+        } else {
+          requestParams.response_format = "verbose_json";
+        }
+
+        transcription = await client.audio.transcriptions.create(requestParams);
+        console.log("Complete audio transcription successful");
+      } finally {
+        if (tempFilePath) {
+          try {
+            if (fs.existsSync(tempFilePath)) {
+              fs.unlinkSync(tempFilePath);
+            }
+          } catch (err) {
+            console.warn("Failed to cleanup temp file:", err);
+          }
+        }
+      }
+
+      return transcription;
     }
 
-    if (!audioFile) {
-      const tempDir = os.tmpdir();
-      tempFilePath = path.join(
-        tempDir,
-        `openai-complete-audio-${Date.now()}-${Math.random()
-          .toString(36)
-          .substring(7)}.wav`
-      );
+    // File is too large - split into chunks and transcribe separately
+    console.log(
+      `Audio file too large (${fileSizeMB.toFixed(2)}MB). Splitting into chunks...`
+    );
 
-      fs.writeFileSync(tempFilePath, wavBuffer);
+    const chunks = splitPcmIntoChunks(audioBuffer, sample_rate);
+    console.log(`Split into ${chunks.length} chunks for transcription`);
 
-      const fileStream = fs.createReadStream(tempFilePath);
-      fileStream.name = "meeting-audio.wav";
-      fileStream.path = tempFilePath;
-      fileStream.type = "audio/wav";
-
-      audioFile = fileStream;
-    }
-
-    let transcription;
-    try {
+    // Transcribe each chunk sequentially (to avoid rate limits)
+    const chunkResults = [];
+    for (let i = 0; i < chunks.length; i++) {
       console.log(
-        `Transcribing complete audio file (${(
-          wavBuffer.length /
-          1024 /
-          1024
+        `Transcribing chunk ${i + 1}/${chunks.length} (${(
+          (pcmToWav(chunks[i], sample_rate).length / 1024 / 1024)
         ).toFixed(2)}MB)...`
       );
 
-      // Build request parameters
-      const requestParams = {
-        file: audioFile,
-        model: model,
-        language: language || undefined,
-      };
-
-      // For diarization models, chunking_strategy is REQUIRED
-      // According to OpenAI docs, chunking_strategy should be a string "auto", not an object
-      if (model.includes("diarize")) {
-        requestParams.response_format = "diarized_json";
-        requestParams.chunking_strategy = "auto";
-        requestParams.timestamp_granularities = ["segment"];
-      } else {
-        requestParams.response_format = "verbose_json";
-      }
-
-      transcription = await client.audio.transcriptions.create(requestParams);
-      console.log("Complete audio transcription successful");
-    } finally {
-      if (tempFilePath) {
-        try {
-          if (fs.existsSync(tempFilePath)) {
-            fs.unlinkSync(tempFilePath);
-          }
-        } catch (err) {
-          console.warn("Failed to cleanup temp file:", err);
-        }
+      try {
+        const chunkResult = await transcribeAudioChunk(chunks[i], {
+          model,
+          language,
+          sample_rate,
+        });
+        chunkResults.push(chunkResult);
+        console.log(
+          `Chunk ${i + 1}/${chunks.length} transcribed successfully`
+        );
+      } catch (error) {
+        console.error(`Error transcribing chunk ${i + 1}:`, error);
+        // Continue with other chunks even if one fails
+        // Add a placeholder to maintain chunk order
+        chunkResults.push({
+          text: `[Transcription error for chunk ${i + 1}]`,
+          segments: [],
+          duration: 0,
+        });
       }
     }
 
-    return transcription;
+    // Merge all chunk results
+    console.log("Merging transcription results from all chunks...");
+    const mergedTranscription = mergeTranscriptionChunks(
+      chunkResults,
+      chunks,
+      sample_rate
+    );
+
+    if (!mergedTranscription) {
+      throw new Error("Failed to merge transcription chunks");
+    }
+
+    console.log(
+      `Complete audio transcription successful (${chunks.length} chunks merged)`
+    );
+    return mergedTranscription;
   } catch (error) {
     console.error("Error transcribing complete audio:", error);
     throw error;
