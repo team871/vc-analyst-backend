@@ -32,7 +32,7 @@ function getOpenAIClient() {
 const router = express.Router();
 
 // Store active sessions and their connections
-const activeSessions = new Map(); // sessionId -> { socket, audioBuffer, conversationBuffer, lastQuestionGeneration, initialQuestionsGenerated }
+const activeSessions = new Map(); // sessionId -> { socket, audioBuffer, conversationBuffer, lastQuestionGeneration, initialQuestionsGenerated, lastAudioReceived }
 
 /**
  * Background processing for stopping a live conversation session.
@@ -265,6 +265,11 @@ async function processSessionStop(sessionId) {
 
     // Clean up active session
     if (activeSession) {
+      // Clear auto-stop interval if it exists
+      if (activeSession.autoStopCheckInterval) {
+        clearInterval(activeSession.autoStopCheckInterval);
+        activeSession.autoStopCheckInterval = null;
+      }
       activeSessions.delete(session._id.toString());
     }
 
@@ -950,10 +955,18 @@ router.patch(
       // Generate replacement question(s) asynchronously
       setImmediate(async () => {
         try {
+          // Get existing questions to avoid duplicates
+          const existingQuestionTexts = session.suggestedQuestions
+            .filter(
+              (q) => !q.deleted && q._id.toString() !== req.params.questionId
+            )
+            .map((q) => q.question);
+
           const suggestions = await generateQuestionSuggestions(
             session.pitchDeck.toString(),
             sessionTranscripts,
-            null
+            null,
+            existingQuestionTexts // Pass existing questions for deduplication
           );
 
           if (suggestions && suggestions.questions.length > 0) {
@@ -1236,6 +1249,16 @@ router.post(
         `[STOP] Queueing background processing for session ${sessionIdString}`
       );
 
+      // Clean up auto-stop interval if it exists
+      const activeSession = activeSessions.get(sessionIdString);
+      if (activeSession && activeSession.autoStopCheckInterval) {
+        clearInterval(activeSession.autoStopCheckInterval);
+        activeSession.autoStopCheckInterval = null;
+        console.log(
+          `[STOP] Cleared auto-stop interval for session ${sessionIdString}`
+        );
+      }
+
       // Optimistically mark session as ended; background job will finalize details
       session.status = "ENDED";
       session.endedAt = new Date();
@@ -1314,12 +1337,110 @@ function setupLiveConversationHandlers(io, socket) {
           initialQuestionsGenerated: false,
           audioChunkCount: 0,
           lastAudioStatusUpdate: Date.now(),
+          lastAudioReceived: Date.now(), // Track last audio received for auto-stop
           transcriptBuffer: [], // Store recent live transcripts for question generation
+          autoStopCheckInterval: null, // Store interval ID for auto-stop checking
         });
+      } else {
+        // Update existing session with new socket and reset audio timestamp
+        const existingSession = activeSessions.get(sessionId);
+        existingSession.socket = socket;
+        existingSession.lastAudioReceived = Date.now();
       }
 
       // Reset initial questions flag for this session
       initialQuestionsGenerated = false;
+
+      // Start auto-stop check interval (check every 30 seconds for 4 minutes of silence)
+      const activeSessionForAutoStop = activeSessions.get(sessionId);
+      if (
+        activeSessionForAutoStop &&
+        !activeSessionForAutoStop.autoStopCheckInterval
+      ) {
+        const AUTO_STOP_TIMEOUT_MS = 4 * 60 * 1000; // 4 minutes
+        const CHECK_INTERVAL_MS = 30 * 1000; // Check every 30 seconds
+
+        activeSessionForAutoStop.autoStopCheckInterval = setInterval(
+          async () => {
+            try {
+              const session = activeSessions.get(sessionId);
+              if (!session) {
+                // Session already cleaned up
+                return;
+              }
+
+              const now = Date.now();
+              const lastAudioTime =
+                session.lastAudioReceived ||
+                session.lastAudioStatusUpdate ||
+                session.startedAt?.getTime() ||
+                now;
+              const timeSinceLastAudio = now - lastAudioTime;
+
+              if (timeSinceLastAudio >= AUTO_STOP_TIMEOUT_MS) {
+                console.log(
+                  `[AUTO-STOP] Session ${sessionId} has been inactive for ${Math.round(
+                    timeSinceLastAudio / 1000
+                  )}s. Auto-stopping...`
+                );
+
+                // Clear the interval
+                if (session.autoStopCheckInterval) {
+                  clearInterval(session.autoStopCheckInterval);
+                  session.autoStopCheckInterval = null;
+                }
+
+                // Stop the session
+                const sessionDoc = await LiveConversation.findById(sessionId);
+                if (sessionDoc && sessionDoc.status === "ACTIVE") {
+                  sessionDoc.status = "ENDED";
+                  sessionDoc.endedAt = new Date();
+                  sessionDoc.totalDuration = Math.floor(
+                    (sessionDoc.endedAt.getTime() -
+                      sessionDoc.startedAt.getTime()) /
+                      1000
+                  );
+                  await sessionDoc.save();
+
+                  // Emit auto-stop event to client
+                  const currentSession = activeSessions.get(sessionId);
+                  if (
+                    currentSession &&
+                    currentSession.socket &&
+                    currentSession.socket.connected
+                  ) {
+                    currentSession.socket.emit("session-auto-stopped", {
+                      reason: "No audio received for 4 minutes",
+                      endedAt: sessionDoc.endedAt,
+                      totalDuration: sessionDoc.totalDuration,
+                    });
+                  }
+
+                  // Process session stop in background
+                  setImmediate(() => {
+                    processSessionStop(sessionId).catch((err) => {
+                      console.error(
+                        "[AUTO-STOP] Background processing error:",
+                        err
+                      );
+                    });
+                  });
+                }
+              }
+            } catch (error) {
+              console.error("[AUTO-STOP] Error in auto-stop check:", error);
+            }
+          },
+          CHECK_INTERVAL_MS
+        );
+
+        console.log(
+          `[AUTO-STOP] Started auto-stop monitoring for session ${sessionId}`
+        );
+      } else if (activeSessionForAutoStop) {
+        // Session exists, just update lastAudioReceived timestamp
+        activeSessionForAutoStop.lastAudioReceived = Date.now();
+      }
 
       // Generate initial questions based on pitch deck
       setImmediate(async () => {
@@ -1335,10 +1456,18 @@ function setupLiveConversationHandlers(io, socket) {
           const sessionDoc = await LiveConversation.findById(sessionId);
           if (!sessionDoc) return;
 
+          // Get existing questions to avoid duplicates (for initial questions)
+          const existingQuestionTexts = sessionDoc.suggestedQuestions
+            ? sessionDoc.suggestedQuestions
+                .filter((q) => !q.deleted && !q.answered)
+                .map((q) => q.question)
+            : [];
+
           const suggestions = await generateQuestionSuggestions(
-            session.pitchDeck.toString(),
+            sessionDoc.pitchDeck.toString(),
             [],
-            null
+            null,
+            existingQuestionTexts // Pass existing questions for deduplication
           );
 
           if (suggestions && suggestions.questions.length > 0) {
@@ -1598,6 +1727,9 @@ function setupLiveConversationHandlers(io, socket) {
       // Track audio chunks received
       activeSession.audioChunkCount = (activeSession.audioChunkCount || 0) + 1;
 
+      // Update last audio received timestamp for auto-stop functionality
+      activeSession.lastAudioReceived = Date.now();
+
       // Log first few chunks for debugging
       if (activeSession.audioChunkCount <= 3) {
         console.log(
@@ -1668,7 +1800,7 @@ function setupLiveConversationHandlers(io, socket) {
           // Debug logging
           const shouldGenerate =
             activeSession.initialQuestionsGenerated &&
-            timeSinceLastGeneration > 60000 && // 60 seconds
+            timeSinceLastGeneration > 20000 && // 20 seconds (3 per minute)
             // unansweredCount > 0 &&
             // unansweredCount < 10 &&
             wordCount >= 50;
@@ -1680,11 +1812,11 @@ function setupLiveConversationHandlers(io, socket) {
               const reasons = [];
               if (!activeSession.initialQuestionsGenerated)
                 reasons.push("initial not generated");
-              if (timeSinceLastGeneration <= 60000)
+              if (timeSinceLastGeneration <= 20000)
                 reasons.push(
                   `only ${Math.round(
                     timeSinceLastGeneration / 1000
-                  )}s since last (need 60s)`
+                  )}s since last (need 20s)`
                 );
               if (unansweredCount === 0)
                 reasons.push("no unanswered questions");
@@ -1701,7 +1833,7 @@ function setupLiveConversationHandlers(io, socket) {
             }
           }
 
-          // Generate questions every 60 seconds during active meeting
+          // Generate questions every 20 seconds during active meeting (3 per minute)
           // Use transcripts from database for context-aware questions
           if (shouldGenerate) {
             console.log(
@@ -1715,10 +1847,16 @@ function setupLiveConversationHandlers(io, socket) {
 
             activeSession.lastQuestionGeneration = now;
 
+            // Get existing questions to avoid duplicates
+            const existingQuestionTexts = sessionDoc.suggestedQuestions
+              .filter((q) => !q.deleted && !q.answered)
+              .map((q) => q.question);
+
             const suggestions = await generateQuestionSuggestions(
               sessionDoc.pitchDeck.toString(),
               recentTranscripts, // Use transcripts from database
-              lastQuestionGeneration
+              lastQuestionGeneration,
+              existingQuestionTexts // Pass existing questions for deduplication
             );
 
             if (suggestions && suggestions.questions.length > 0) {
@@ -1820,6 +1958,13 @@ function setupLiveConversationHandlers(io, socket) {
           // Mark socket as disconnected but KEEP the session data
           // The audio buffer needs to be preserved until stop endpoint is called
           activeSession.socket = null;
+
+          // Clear auto-stop interval on disconnect (will be restarted if reconnected)
+          if (activeSession.autoStopCheckInterval) {
+            clearInterval(activeSession.autoStopCheckInterval);
+            activeSession.autoStopCheckInterval = null;
+          }
+
           console.log(
             `[${
               socket.userId

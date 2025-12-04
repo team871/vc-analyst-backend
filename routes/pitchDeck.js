@@ -350,25 +350,49 @@ ${
 
     const analysisText = completion.choices[0].message.content;
 
-    // Try to parse JSON response, fallback to structured text if needed
+    // Try to parse JSON response with improved parsing logic
     const parsed = tryParseJson(analysisText);
     let analysis;
-    if (parsed && typeof parsed === "object") {
+
+    // Validate parsed result - must be object (not array) and have expected structure
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      (parsed.summary || parsed.keyPoints || parsed.marketSize)
+    ) {
       analysis = parsed;
+      console.log(
+        `Successfully parsed analysis JSON for pitch deck ${pitchDeckId}`
+      );
     } else {
+      // JSON parsing failed - log for debugging
+      console.warn(
+        `Failed to parse analysis JSON for pitch deck ${pitchDeckId}. ` +
+          `Response length: ${analysisText.length}, ` +
+          `First 200 chars: ${analysisText.substring(0, 200)}`
+      );
+
       // If JSON parsing fails, create structured analysis from text
       const text = stripCodeFences(analysisText) || "";
       analysis = {
-        summary: text,
+        summary: text.substring(0, 1000), // Limit length
         keyPoints: text
           .split("\n")
-          .filter((line) => line.trim().startsWith("-"))
-          .map((line) => line.replace(/^ -?\s*/, "")),
+          .filter(
+            (line) => line.trim().startsWith("-") || line.trim().startsWith("*")
+          )
+          .slice(0, 6)
+          .map((line) => line.replace(/^[-\*]\s*/, "")),
         marketSize: "Analysis available in summary",
         businessModel: "Analysis available in summary",
         competitiveAdvantage: "Analysis available in summary",
         team: "Analysis available in summary",
-        financials: "Analysis available in summary",
+        financials: {
+          traction: "Analysis available in summary",
+          fundraising: "Analysis available in summary",
+          unitEconomics: "Analysis available in summary",
+        },
         risks: ["See detailed analysis"],
         opportunities: ["See detailed analysis"],
         recommendation: "See detailed analysis",
@@ -1488,17 +1512,36 @@ Current analyst message: "${userMessageContent}"`;
     if (needsFullReanalysis) {
       // Full re-analysis: Response should be direct analysis object (like analyzePitchDeckWithBase64)
       let analysis;
-      if (parsed && typeof parsed === "object") {
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed) &&
+        (parsed.summary || parsed.keyPoints || parsed.marketSize)
+      ) {
         analysis = parsed;
+        console.log(
+          `Successfully parsed re-analysis JSON for pitch deck ${pitchDeckId}`
+        );
       } else {
+        // JSON parsing failed - log for debugging
+        console.warn(
+          `Failed to parse re-analysis JSON for pitch deck ${pitchDeckId}. ` +
+            `Response length: ${analysisText.length}, ` +
+            `First 200 chars: ${analysisText.substring(0, 200)}`
+        );
+
         // If JSON parsing fails, create structured analysis from text (similar to analyzePitchDeckWithBase64)
         const text = stripCodeFences(analysisText) || "";
         analysis = {
-          summary: text.substring(0, 500),
+          summary: text.substring(0, 1000), // Limit length
           keyPoints: text
             .split("\n")
-            .filter((line) => line.trim().startsWith("-"))
-            .map((line) => line.replace(/^ -?\s*/, "")),
+            .filter(
+              (line) =>
+                line.trim().startsWith("-") || line.trim().startsWith("*")
+            )
+            .slice(0, 6)
+            .map((line) => line.replace(/^[-\*]\s*/, "")),
           marketSize: "Analysis available in summary",
           businessModel: "Analysis available in summary",
           competitiveAdvantage: "Analysis available in summary",

@@ -68,20 +68,45 @@ const generateRandomString = (length = 8) => {
 };
 
 // Strip ```json ... ``` or ``` ... ``` fences
+// Handles cases where there's text before/after the code fence block
 const stripCodeFences = (text) => {
   if (!text || typeof text !== "string") return text;
-  const fenceRe = /^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$/i;
-  const m = text.match(fenceRe);
-  return m ? m[1] : text;
+  
+  // First try exact match (entire string wrapped in fences)
+  const exactMatch = /^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$/i;
+  let m = text.match(exactMatch);
+  if (m) return m[1];
+  
+  // If that fails, try to find code fence block anywhere in the text
+  // This handles cases where AI adds markdown after the JSON block
+  const partialMatch = /```(?:json)?\s*([\s\S]*?)\s*```/i;
+  m = text.match(partialMatch);
+  if (m) return m[1];
+  
+  // No code fences found, return original
+  return text;
 };
 
 // Safe JSON parse after cleaning
 const tryParseJson = (text) => {
   if (!text) return null;
-  const cleaned = stripCodeFences(String(text)).trim();
+  let cleaned = stripCodeFences(String(text)).trim();
+  
+  // Try parsing directly
   try {
     return JSON.parse(cleaned);
   } catch (e) {
+    // If that fails, try to extract JSON object from the text
+    // This handles cases where there's extra text mixed in
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        return JSON.parse(jsonMatch[0]);
+      } catch (e2) {
+        // Still failed, return null
+        return null;
+      }
+    }
     return null;
   }
 };

@@ -18,21 +18,205 @@ function getOpenAIClient() {
   return openaiClient;
 }
 
-// Rate limiting: Generate suggestions every 30-60 seconds
-const SUGGESTION_INTERVAL_MS = 45000; // 45 seconds
+// Rate limiting: Generate suggestions 3 per minute (every 20 seconds)
+const SUGGESTION_INTERVAL_MS = 20000; // 20 seconds (3 per minute)
 const MIN_CONTEXT_WORDS = 50; // Minimum words needed before generating suggestions
+
+/**
+ * Normalize a question for comparison (lowercase, remove punctuation, trim)
+ * @param {string} question - The question to normalize
+ * @returns {string} Normalized question
+ */
+function normalizeQuestion(question) {
+  if (!question || typeof question !== "string") return "";
+  return question
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ") // Replace punctuation with spaces
+    .replace(/\s+/g, " ") // Normalize whitespace
+    .trim();
+}
+
+/**
+ * Calculate similarity between two questions using word overlap
+ * @param {string} q1 - First question
+ * @param {string} q2 - Second question
+ * @returns {number} Similarity score between 0 and 1
+ */
+function calculateQuestionSimilarity(q1, q2) {
+  const normalized1 = normalizeQuestion(q1);
+  const normalized2 = normalizeQuestion(q2);
+
+  // Exact match after normalization
+  if (normalized1 === normalized2) return 1.0;
+
+  // Extract words (excluding common stop words)
+  const stopWords = new Set([
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "but",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "of",
+    "with",
+    "by",
+    "from",
+    "as",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "should",
+    "could",
+    "can",
+    "may",
+    "might",
+    "must",
+    "this",
+    "that",
+    "these",
+    "those",
+    "what",
+    "which",
+    "who",
+    "whom",
+    "whose",
+    "where",
+    "when",
+    "why",
+    "how",
+    "if",
+    "then",
+    "than",
+    "so",
+    "about",
+    "into",
+    "onto",
+    "upon",
+    "over",
+    "under",
+    "above",
+    "below",
+    "between",
+    "among",
+  ]);
+
+  const words1 = normalized1
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !stopWords.has(w));
+  const words2 = normalized2
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !stopWords.has(w));
+
+  if (words1.length === 0 || words2.length === 0) return 0;
+
+  // Calculate Jaccard similarity (intersection over union)
+  const set1 = new Set(words1);
+  const set2 = new Set(words2);
+
+  const intersection = new Set([...set1].filter((x) => set2.has(x)));
+  const union = new Set([...set1, ...set2]);
+
+  return intersection.size / union.size;
+}
+
+/**
+ * Check if a question is too similar to existing questions
+ * @param {string} newQuestion - The new question to check
+ * @param {Array<string>} existingQuestions - Array of existing question texts
+ * @param {number} similarityThreshold - Threshold for similarity (default 0.7)
+ * @returns {boolean} True if question is too similar to existing ones
+ */
+function isQuestionDuplicate(
+  newQuestion,
+  existingQuestions,
+  similarityThreshold = 0.7
+) {
+  if (!newQuestion || !existingQuestions || existingQuestions.length === 0) {
+    return false;
+  }
+
+  for (const existingQ of existingQuestions) {
+    const similarity = calculateQuestionSimilarity(newQuestion, existingQ);
+    if (similarity >= similarityThreshold) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Filter out duplicate questions from a list
+ * @param {Array<string>} questions - Array of questions to filter
+ * @param {Array<string>} existingQuestions - Array of existing questions to compare against
+ * @param {number} similarityThreshold - Threshold for similarity (default 0.7)
+ * @returns {Array<string>} Filtered array of unique questions
+ */
+function filterDuplicateQuestions(
+  questions,
+  existingQuestions = [],
+  similarityThreshold = 0.7
+) {
+  if (!questions || questions.length === 0) return [];
+
+  const filtered = [];
+  const seen = new Set();
+
+  for (const question of questions) {
+    const normalized = normalizeQuestion(question);
+
+    // Skip if already seen in this batch
+    if (seen.has(normalized)) {
+      continue;
+    }
+
+    // Skip if too similar to existing questions
+    if (isQuestionDuplicate(question, existingQuestions, similarityThreshold)) {
+      console.log(
+        `[QUESTION-DEDUP] Filtered duplicate question: "${question.substring(
+          0,
+          60
+        )}..."`
+      );
+      continue;
+    }
+
+    filtered.push(question);
+    seen.add(normalized);
+  }
+
+  return filtered;
+}
 
 /**
  * Generate question suggestions based on live conversation and knowledge base
  * @param {string} pitchDeckId - The pitch deck ID
  * @param {Array<Object>} recentTranscripts - Array of recent transcript entries with {text, timestamp}
  * @param {Date} lastSuggestionTime - Timestamp of last suggestion generation
+ * @param {Array<string>} existingQuestions - Array of existing question texts to avoid duplicates
  * @returns {Promise<Object>} Question suggestions with context
  */
 async function generateQuestionSuggestions(
   pitchDeckId,
   recentTranscripts = [],
-  lastSuggestionTime = null
+  lastSuggestionTime = null,
+  existingQuestions = []
 ) {
   try {
     // Check rate limiting (skip if lastSuggestionTime is null, e.g., for initial questions)
@@ -100,7 +284,15 @@ ${
   !isInitialGeneration
     ? "- Avoid questions that have already been answered in the conversation\n"
     : ""
-}- Make questions natural and conversational (not overly formal)
+}${
+      existingQuestions && existingQuestions.length > 0
+        ? `- CRITICAL: Do NOT generate questions that are similar or duplicate to these existing questions:\n${existingQuestions
+            .map((q, i) => `  ${i + 1}. "${q}"`)
+            .join(
+              "\n"
+            )}\n- Ensure all generated questions are meaningfully different from the existing ones\n`
+        : ""
+    }- Make questions natural and conversational (not overly formal)
 
 Return your response as a JSON object with this structure:
 {
@@ -133,8 +325,22 @@ Output valid JSON only.`;
     const parsed = tryParseJson(responseText);
 
     if (parsed && typeof parsed === "object" && parsed.questions) {
+      // Filter out duplicate questions
+      const filteredQuestions = filterDuplicateQuestions(
+        parsed.questions || [],
+        existingQuestions,
+        0.7 // 70% similarity threshold
+      );
+
+      if (filteredQuestions.length === 0) {
+        console.log(
+          "[QUESTION-DEDUP] All generated questions were filtered as duplicates. Returning null."
+        );
+        return null;
+      }
+
       return {
-        questions: parsed.questions || [],
+        questions: filteredQuestions,
         context:
           parsed.context || "Based on recent conversation and knowledge base",
         topics: parsed.topics || [],
@@ -213,6 +419,9 @@ function shouldGenerateSuggestions(
 module.exports = {
   generateQuestionSuggestions,
   shouldGenerateSuggestions,
+  filterDuplicateQuestions,
+  isQuestionDuplicate,
+  calculateQuestionSimilarity,
   SUGGESTION_INTERVAL_MS,
   MIN_CONTEXT_WORDS,
 };
