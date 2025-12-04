@@ -18,8 +18,8 @@ function getOpenAIClient() {
   return openaiClient;
 }
 
-// Rate limiting: Generate suggestions 3 per minute (every 20 seconds)
-const SUGGESTION_INTERVAL_MS = 20000; // 20 seconds (3 per minute)
+// Rate limiting: Generate suggestions every 1 minute
+const SUGGESTION_INTERVAL_MS = 60000; // 60 seconds (1 per minute)
 const MIN_CONTEXT_WORDS = 50; // Minimum words needed before generating suggestions
 
 /**

@@ -1800,7 +1800,7 @@ function setupLiveConversationHandlers(io, socket) {
           // Debug logging
           const shouldGenerate =
             activeSession.initialQuestionsGenerated &&
-            timeSinceLastGeneration > 20000 && // 20 seconds (3 per minute)
+            timeSinceLastGeneration > 60000 && // 60 seconds (1 per minute)
             // unansweredCount > 0 &&
             // unansweredCount < 10 &&
             wordCount >= 50;
@@ -1812,11 +1812,11 @@ function setupLiveConversationHandlers(io, socket) {
               const reasons = [];
               if (!activeSession.initialQuestionsGenerated)
                 reasons.push("initial not generated");
-              if (timeSinceLastGeneration <= 20000)
+              if (timeSinceLastGeneration <= 60000)
                 reasons.push(
                   `only ${Math.round(
                     timeSinceLastGeneration / 1000
-                  )}s since last (need 20s)`
+                  )}s since last (need 60s)`
                 );
               if (unansweredCount === 0)
                 reasons.push("no unanswered questions");
@@ -1833,7 +1833,7 @@ function setupLiveConversationHandlers(io, socket) {
             }
           }
 
-          // Generate questions every 20 seconds during active meeting (3 per minute)
+          // Generate questions every 1 minute during active meeting
           // Use transcripts from database for context-aware questions
           if (shouldGenerate) {
             console.log(
