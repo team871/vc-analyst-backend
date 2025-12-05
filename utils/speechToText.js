@@ -279,12 +279,49 @@ function splitPcmIntoChunks(pcmBuffer, sampleRate = 16000) {
 }
 
 /**
- * Transcribe a single audio chunk
+ * Check if an error is retryable
+ * @param {Error} error - The error to check
+ * @returns {boolean} True if the error is retryable
+ */
+function isRetryableError(error) {
+  if (!error || !error.status) {
+    return false;
+  }
+
+  // Retry on 500, 502, 503, 504 (server errors)
+  // Also retry on 429 (rate limit)
+  // Don't retry on 400 (bad request) unless it's a specific case
+  const retryableStatuses = [500, 502, 503, 504, 429];
+  
+  if (retryableStatuses.includes(error.status)) {
+    return true;
+  }
+
+  // For 400 errors, check if it's a "something went wrong reading your request" error
+  // which might be a transient issue
+  if (error.status === 400 && error.error && error.error.message) {
+    const message = error.error.message.toLowerCase();
+    if (
+      message.includes("something went wrong") ||
+      message.includes("reading your request") ||
+      message.includes("timeout") ||
+      message.includes("temporary")
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Transcribe a single audio chunk with retry logic
  * @param {Buffer} pcmChunk - PCM audio chunk
  * @param {Object} options - Configuration options
+ * @param {number} maxRetries - Maximum number of retry attempts (default: 3)
  * @returns {Promise<Object>} Transcription result
  */
-async function transcribeAudioChunk(pcmChunk, options = {}) {
+async function transcribeAudioChunk(pcmChunk, options = {}, maxRetries = 3) {
   const client = initializeOpenAI();
 
   const {
@@ -295,71 +332,106 @@ async function transcribeAudioChunk(pcmChunk, options = {}) {
 
   const wavBuffer = pcmToWav(pcmChunk, sample_rate);
 
-  const fs = require("fs");
-  const path = require("path");
-  const os = require("os");
-  let audioFile;
-  let tempFilePath = null;
+  let lastError = null;
 
-  if (typeof File !== "undefined" && typeof Blob !== "undefined") {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const fs = require("fs");
+    const path = require("path");
+    const os = require("os");
+    let audioFile;
+    let tempFilePath = null;
+
     try {
-      const blob = new Blob([wavBuffer], { type: "audio/wav" });
-      audioFile = new File([blob], "audio-chunk.wav", {
-        type: "audio/wav",
-        lastModified: Date.now(),
-      });
-    } catch (err) {
-      console.warn("File API creation failed, using temp file:", err.message);
-    }
-  }
-
-  if (!audioFile) {
-    const tempDir = os.tmpdir();
-    tempFilePath = path.join(
-      tempDir,
-      `openai-audio-chunk-${Date.now()}-${Math.random()
-        .toString(36)
-        .substring(7)}.wav`
-    );
-
-    fs.writeFileSync(tempFilePath, wavBuffer);
-
-    const fileStream = fs.createReadStream(tempFilePath);
-    fileStream.name = "audio-chunk.wav";
-    fileStream.path = tempFilePath;
-    fileStream.type = "audio/wav";
-
-    audioFile = fileStream;
-  }
-
-  try {
-    const requestParams = {
-      file: audioFile,
-      model: model,
-      language: language || undefined,
-    };
-
-    if (model.includes("diarize")) {
-      requestParams.response_format = "diarized_json";
-      requestParams.chunking_strategy = "auto";
-      requestParams.timestamp_granularities = ["segment"];
-    } else {
-      requestParams.response_format = "verbose_json";
-    }
-
-    const transcription = await client.audio.transcriptions.create(requestParams);
-    return transcription;
-  } finally {
-    if (tempFilePath) {
-      try {
-        if (fs.existsSync(tempFilePath)) {
-          fs.unlinkSync(tempFilePath);
+      if (typeof File !== "undefined" && typeof Blob !== "undefined") {
+        try {
+          const blob = new Blob([wavBuffer], { type: "audio/wav" });
+          audioFile = new File([blob], "audio-chunk.wav", {
+            type: "audio/wav",
+            lastModified: Date.now(),
+          });
+        } catch (err) {
+          console.warn("File API creation failed, using temp file:", err.message);
         }
-      } catch (err) {
-        console.warn("Failed to cleanup temp file:", err);
+      }
+
+      if (!audioFile) {
+        const tempDir = os.tmpdir();
+        tempFilePath = path.join(
+          tempDir,
+          `openai-audio-chunk-${Date.now()}-${Math.random()
+            .toString(36)
+            .substring(7)}.wav`
+        );
+
+        fs.writeFileSync(tempFilePath, wavBuffer);
+
+        const fileStream = fs.createReadStream(tempFilePath);
+        fileStream.name = "audio-chunk.wav";
+        fileStream.path = tempFilePath;
+        fileStream.type = "audio/wav";
+
+        audioFile = fileStream;
+      }
+
+      const requestParams = {
+        file: audioFile,
+        model: model,
+        language: language || undefined,
+      };
+
+      if (model.includes("diarize")) {
+        requestParams.response_format = "diarized_json";
+        requestParams.chunking_strategy = "auto";
+        requestParams.timestamp_granularities = ["segment"];
+      } else {
+        requestParams.response_format = "verbose_json";
+      }
+
+      const transcription = await client.audio.transcriptions.create(requestParams);
+      
+      // Cleanup temp file on success
+      if (tempFilePath) {
+        try {
+          if (fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+          }
+        } catch (err) {
+          console.warn("Failed to cleanup temp file:", err);
+        }
+      }
+
+      return transcription;
+    } catch (error) {
+      lastError = error;
+
+      // Cleanup temp file on error
+      if (tempFilePath) {
+        try {
+          if (fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+          }
+        } catch (err) {
+          console.warn("Failed to cleanup temp file:", err);
+        }
+      }
+
+      // Check if error is retryable
+      if (attempt < maxRetries && isRetryableError(error)) {
+        const delayMs = Math.min(1000 * Math.pow(2, attempt), 10000); // Exponential backoff, max 10s
+        console.log(
+          `Transcription attempt ${attempt + 1}/${maxRetries + 1} failed (${error.status || "unknown"}). Retrying in ${delayMs}ms...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      } else {
+        // Not retryable or max retries reached
+        throw error;
       }
     }
   }
+
+  // Should never reach here, but just in case
+  throw lastError || new Error("Failed to transcribe audio chunk");
 }
 
 /**
@@ -548,6 +620,8 @@ async function transcribeCompleteAudio(audioBuffer, options = {}) {
 
     // Transcribe each chunk sequentially (to avoid rate limits)
     const chunkResults = [];
+    const failedChunks = [];
+    
     for (let i = 0; i < chunks.length; i++) {
       console.log(
         `Transcribing chunk ${i + 1}/${chunks.length} (${(
@@ -560,20 +634,41 @@ async function transcribeCompleteAudio(audioBuffer, options = {}) {
           model,
           language,
           sample_rate,
-        });
+        }, 3); // 3 retries per chunk
+        
         chunkResults.push(chunkResult);
         console.log(
           `Chunk ${i + 1}/${chunks.length} transcribed successfully`
         );
       } catch (error) {
-        console.error(`Error transcribing chunk ${i + 1}:`, error);
-        // Continue with other chunks even if one fails
+        console.error(`Error transcribing chunk ${i + 1} after retries:`, error);
+        failedChunks.push(i + 1);
+        
+        // Calculate chunk duration for placeholder
+        const bytesPerSecond = sample_rate * 2;
+        const chunkDuration = chunks[i].length / bytesPerSecond;
+        
         // Add a placeholder to maintain chunk order
         chunkResults.push({
-          text: `[Transcription error for chunk ${i + 1}]`,
+          text: `[Transcription failed for chunk ${i + 1} after retries: ${error.status || "unknown error"}]`,
           segments: [],
-          duration: 0,
+          duration: chunkDuration,
+          language: null,
         });
+      }
+    }
+
+    // Log summary of failed chunks
+    if (failedChunks.length > 0) {
+      console.warn(
+        `Warning: ${failedChunks.length} chunk(s) failed transcription: ${failedChunks.join(", ")}`
+      );
+      
+      // If all chunks failed, throw an error to trigger retry mechanism
+      if (failedChunks.length === chunks.length) {
+        throw new Error(
+          `All ${chunks.length} audio chunks failed transcription. This will trigger retry mechanism.`
+        );
       }
     }
 
