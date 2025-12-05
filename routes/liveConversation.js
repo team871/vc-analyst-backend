@@ -12,6 +12,11 @@ const {
   generateQuestionSuggestions,
 } = require("../utils/liveQuestionGenerator");
 const { getFormattedContext } = require("../utils/contextRetrieval");
+const {
+  uploadToS3,
+  downloadFromS3,
+  generateFileKey,
+} = require("../utils/s3Upload");
 const OpenAI = require("openai");
 const { tryParseJson, stripCodeFences } = require("../utils/helpers");
 
@@ -35,6 +40,188 @@ const router = express.Router();
 const activeSessions = new Map(); // sessionId -> { socket, audioBuffer, conversationBuffer, lastQuestionGeneration, initialQuestionsGenerated, lastAudioReceived }
 
 /**
+ * Retry summary generation by fetching audio from S3 and processing it
+ * @param {string} sessionId - The session ID
+ * @param {string} audioFileKey - The S3 key for the audio file
+ * @param {number} totalDuration - Meeting duration in seconds
+ * @param {Array} detectedLanguages - Detected languages
+ * @param {Date} startedAt - Session start time
+ * @param {string} pitchDeckId - Pitch deck ID
+ * @returns {Promise<Object|null>} Summary object or null if failed
+ */
+async function retrySummaryGeneration(
+  sessionId,
+  audioFileKey,
+  totalDuration,
+  detectedLanguages,
+  startedAt,
+  pitchDeckId
+) {
+  try {
+    console.log(
+      `[RETRY-SUMMARY] Attempting to retry summary generation for session ${sessionId} using audio from S3 (key: ${audioFileKey})`
+    );
+
+    // Download audio from S3
+    const audioBuffer = await downloadFromS3(audioFileKey);
+    if (!audioBuffer || audioBuffer.length === 0) {
+      console.error(
+        `[RETRY-SUMMARY] Failed to download audio from S3 or audio is empty`
+      );
+      return null;
+    }
+
+    console.log(
+      `[RETRY-SUMMARY] Downloaded audio from S3: ${(
+        audioBuffer.length /
+        1024 /
+        1024
+      ).toFixed(2)}MB`
+    );
+
+    // Transcribe audio
+    const completeTranscription = await transcribeCompleteAudio(audioBuffer, {
+      model: "gpt-4o-transcribe-diarize",
+      language: null,
+      sample_rate: 16000,
+    });
+
+    // Extract detected language
+    if (completeTranscription.language) {
+      detectedLanguages = [completeTranscription.language];
+    }
+
+    // Get session to access organization and pitchDeck
+    const session = await LiveConversation.findById(sessionId);
+    if (!session) {
+      console.error(`[RETRY-SUMMARY] Session ${sessionId} not found`);
+      return null;
+    }
+
+    // Convert to transcript format and save to database
+    let completeTranscripts = [];
+    if (completeTranscription && completeTranscription.segments) {
+      completeTranscripts = await Promise.all(
+        completeTranscription.segments.map(async (segment) => {
+          let speakerId = null;
+          if (segment.speaker) {
+            const parsed = parseInt(
+              segment.speaker.replace("SPEAKER_", ""),
+              10
+            );
+            if (!isNaN(parsed) && isFinite(parsed)) {
+              speakerId = parsed;
+            }
+          }
+
+          const transcriptData = {
+            text: segment.text || "",
+            timestamp: segment.start
+              ? new Date(startedAt.getTime() + segment.start * 1000)
+              : new Date(),
+            speaker: speakerId !== null ? `Speaker ${speakerId}` : null,
+            speakerId: speakerId,
+            isFinal: true,
+            metadata: {
+              confidence: 1.0,
+              languageCode: completeTranscription.language || null,
+            },
+          };
+
+          // Save transcript to database (only if not already exists)
+          try {
+            const existingTranscript = await ConversationTranscript.findOne({
+              liveConversation: sessionId,
+              timestamp: transcriptData.timestamp,
+              text: transcriptData.text,
+            });
+
+            if (!existingTranscript) {
+              const transcriptEntry = new ConversationTranscript({
+                liveConversation: sessionId,
+                pitchDeck: session.pitchDeck,
+                timestamp: transcriptData.timestamp,
+                text: transcriptData.text,
+                speaker: transcriptData.speaker,
+                speakerId: transcriptData.speakerId,
+                isFinal: transcriptData.isFinal,
+                metadata: transcriptData.metadata,
+              });
+              await transcriptEntry.save();
+            }
+          } catch (saveError) {
+            console.error(
+              `[RETRY-SUMMARY] Error saving transcript:`,
+              saveError
+            );
+            // Continue even if saving fails
+          }
+
+          return transcriptData;
+        })
+      );
+    } else if (completeTranscription && completeTranscription.text) {
+      const transcriptData = {
+        text: completeTranscription.text,
+        timestamp: startedAt,
+        speaker: null,
+        speakerId: null,
+        isFinal: true,
+        metadata: {
+          confidence: 1.0,
+          languageCode: completeTranscription.language || null,
+        },
+      };
+
+      // Save transcript to database
+      try {
+        const existingTranscript = await ConversationTranscript.findOne({
+          liveConversation: sessionId,
+          timestamp: transcriptData.timestamp,
+          text: transcriptData.text,
+        });
+
+        if (!existingTranscript) {
+          const transcriptEntry = new ConversationTranscript({
+            liveConversation: sessionId,
+            pitchDeck: session.pitchDeck,
+            timestamp: transcriptData.timestamp,
+            text: transcriptData.text,
+            speaker: transcriptData.speaker,
+            speakerId: transcriptData.speakerId,
+            isFinal: transcriptData.isFinal,
+            metadata: transcriptData.metadata,
+          });
+          await transcriptEntry.save();
+        }
+      } catch (saveError) {
+        console.error(`[RETRY-SUMMARY] Error saving transcript:`, saveError);
+      }
+
+      completeTranscripts = [transcriptData];
+    }
+
+    // Generate summary
+    if (completeTranscripts.length > 0) {
+      const summary = await generateMeetingSummary(
+        sessionId,
+        pitchDeckId,
+        completeTranscripts,
+        totalDuration,
+        detectedLanguages
+      );
+      console.log(`[RETRY-SUMMARY] Successfully generated summary on retry`);
+      return summary;
+    }
+
+    return null;
+  } catch (error) {
+    console.error(`[RETRY-SUMMARY] Error retrying summary generation:`, error);
+    return null;
+  }
+}
+
+/**
  * Background processing for stopping a live conversation session.
  * Handles full-audio transcription, summary generation, and history logging
  * without blocking the HTTP response of the /:id/stop route.
@@ -56,6 +243,8 @@ async function processSessionStop(sessionId) {
     // Get active session and audio buffer
     const activeSession = activeSessions.get(sessionIdString);
     let completeAudioRecording = null;
+    let audioFileKey = session.metadata?.audioFileKey || null;
+    let audioFileUrl = session.metadata?.audioFileUrl || null;
 
     console.log(
       `[STOP-BG] Session ${
@@ -85,6 +274,45 @@ async function processSessionStop(sessionId) {
             1024
           ).toFixed(2)}MB (${completeAudioRecording.length} bytes)`
         );
+
+        // Save audio to S3 before processing
+        try {
+          if (!audioFileKey) {
+            // Generate S3 key for audio file
+            audioFileKey = generateFileKey(
+              `session-${sessionIdString}.webm`,
+              session.organization.toString(),
+              "live-conversation-audio"
+            );
+
+            console.log(
+              `[STOP-BG] Uploading audio to S3 with key: ${audioFileKey}`
+            );
+            audioFileUrl = await uploadToS3(
+              completeAudioRecording,
+              audioFileKey,
+              "audio/webm"
+            );
+            console.log(
+              `[STOP-BG] Audio uploaded to S3 successfully: ${audioFileUrl}`
+            );
+
+            // Save S3 key and URL to session metadata
+            if (!session.metadata) {
+              session.metadata = {};
+            }
+            session.metadata.audioFileKey = audioFileKey;
+            session.metadata.audioFileUrl = audioFileUrl;
+            await session.save();
+          } else {
+            console.log(
+              `[STOP-BG] Audio already saved to S3 (key: ${audioFileKey}), skipping upload`
+            );
+          }
+        } catch (s3Error) {
+          console.error(`[STOP-BG] Error saving audio to S3:`, s3Error);
+          // Continue processing even if S3 upload fails
+        }
       } else {
         console.warn(
           `[STOP-BG] No audio recording available for session ${
@@ -103,6 +331,28 @@ async function processSessionStop(sessionId) {
           activeSessions.keys()
         ).join(", ")}`
       );
+
+      // Try to use existing S3 audio if available
+      if (audioFileKey) {
+        console.log(
+          `[STOP-BG] Attempting to download audio from S3 (key: ${audioFileKey})`
+        );
+        try {
+          completeAudioRecording = await downloadFromS3(audioFileKey);
+          console.log(
+            `[STOP-BG] Downloaded audio from S3: ${(
+              completeAudioRecording.length /
+              1024 /
+              1024
+            ).toFixed(2)}MB`
+          );
+        } catch (downloadError) {
+          console.error(
+            `[STOP-BG] Failed to download audio from S3:`,
+            downloadError
+          );
+        }
+      }
     }
 
     // Calculate duration (if not already set)
@@ -114,6 +364,7 @@ async function processSessionStop(sessionId) {
     let summary = null;
     let completeTranscripts = [];
     let detectedLanguages = session.metadata?.detectedLanguages || [];
+    let summaryGenerationFailed = false;
 
     try {
       // Transcribe complete audio with OpenAI
@@ -121,6 +372,7 @@ async function processSessionStop(sessionId) {
         console.error(
           "[STOP-BG] OPENAI_API_KEY not set - cannot transcribe complete audio"
         );
+        summaryGenerationFailed = true;
       } else if (completeAudioRecording && completeAudioRecording.length > 0) {
         console.log(
           `[STOP-BG] Transcribing complete audio recording for session ${session._id}...`
@@ -230,32 +482,129 @@ async function processSessionStop(sessionId) {
             console.log(
               "[STOP-BG] Generating meeting summary from complete audio..."
             );
-            summary = await generateMeetingSummary(
-              session._id.toString(),
-              session.pitchDeck.toString(),
-              completeTranscripts,
-              totalDuration,
-              detectedLanguages
+            try {
+              summary = await generateMeetingSummary(
+                session._id.toString(),
+                session.pitchDeck.toString(),
+                completeTranscripts,
+                totalDuration,
+                detectedLanguages
+              );
+              if (summary && summary.content) {
+                console.log(
+                  "[STOP-BG] Meeting summary generated successfully from complete audio."
+                );
+              } else {
+                console.warn(
+                  "[STOP-BG] Summary generation returned empty result"
+                );
+                summaryGenerationFailed = true;
+              }
+            } catch (summaryError) {
+              console.error(
+                "[STOP-BG] Error generating meeting summary:",
+                summaryError
+              );
+              summaryGenerationFailed = true;
+            }
+          } else {
+            console.warn(
+              "[STOP-BG] No transcripts available for summary generation"
             );
-            console.log(
-              "[STOP-BG] Meeting summary generated from complete audio."
-            );
+            summaryGenerationFailed = true;
           }
         } catch (audioError) {
           console.error(
             "[STOP-BG] Error transcribing complete audio:",
             audioError
           );
-          throw audioError;
+          summaryGenerationFailed = true;
         }
       } else {
         console.warn(
           "[STOP-BG] No audio recording available for transcription"
         );
+        summaryGenerationFailed = true;
       }
     } catch (error) {
       console.error("[STOP-BG] Error generating meeting summary:", error);
-      // Continue even if summary generation fails
+      summaryGenerationFailed = true;
+    }
+
+    // If summary generation failed and we have audio in S3, retry
+    if (summaryGenerationFailed && !summary && audioFileKey) {
+      const maxRetries = 3;
+      const currentRetryCount = (session.metadata?.summaryRetryCount || 0) + 1;
+
+      if (currentRetryCount <= maxRetries) {
+        console.log(
+          `[STOP-BG] Summary generation failed, attempting retry ${currentRetryCount}/${maxRetries} using audio from S3`
+        );
+
+        // Record retry attempt
+        const updatedSession = await LiveConversation.findById(session._id);
+        if (updatedSession) {
+          if (!updatedSession.metadata) {
+            updatedSession.metadata = {};
+          }
+          updatedSession.metadata.summaryRetryCount = currentRetryCount;
+          if (!updatedSession.metadata.summaryRetryAttempts) {
+            updatedSession.metadata.summaryRetryAttempts = [];
+          }
+          updatedSession.metadata.summaryRetryAttempts.push({
+            attemptedAt: new Date(),
+            success: false,
+            error: "Initial summary generation failed, retrying...",
+          });
+          await updatedSession.save();
+        }
+
+        // Wait a bit before retry (exponential backoff)
+        const delayMs = Math.min(
+          1000 * Math.pow(2, currentRetryCount - 1),
+          10000
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+        // Retry summary generation
+        const retrySummary = await retrySummaryGeneration(
+          session._id.toString(),
+          audioFileKey,
+          totalDuration,
+          detectedLanguages,
+          session.startedAt,
+          session.pitchDeck.toString()
+        );
+
+        if (retrySummary && retrySummary.content) {
+          summary = retrySummary;
+          console.log(
+            `[STOP-BG] Summary generation succeeded on retry ${currentRetryCount}`
+          );
+
+          // Update retry attempt record
+          const retrySession = await LiveConversation.findById(session._id);
+          if (retrySession && retrySession.metadata?.summaryRetryAttempts) {
+            const lastAttempt =
+              retrySession.metadata.summaryRetryAttempts[
+                retrySession.metadata.summaryRetryAttempts.length - 1
+              ];
+            if (lastAttempt) {
+              lastAttempt.success = true;
+              lastAttempt.error = null;
+            }
+            await retrySession.save();
+          }
+        } else {
+          console.warn(
+            `[STOP-BG] Retry ${currentRetryCount} failed to generate summary`
+          );
+        }
+      } else {
+        console.warn(
+          `[STOP-BG] Maximum retry attempts (${maxRetries}) reached, giving up on summary generation`
+        );
+      }
     }
 
     // Get transcript count
@@ -294,11 +643,22 @@ async function processSessionStop(sessionId) {
       };
     }
 
+    // Ensure metadata object exists
+    if (!updatedSession.metadata) {
+      updatedSession.metadata = {};
+    }
+
+    // Update detected languages
     if (detectedLanguages.length > 0) {
-      if (!updatedSession.metadata) {
-        updatedSession.metadata = {};
-      }
       updatedSession.metadata.detectedLanguages = detectedLanguages;
+    }
+
+    // Preserve audio file info if available
+    if (audioFileKey) {
+      updatedSession.metadata.audioFileKey = audioFileKey;
+    }
+    if (audioFileUrl) {
+      updatedSession.metadata.audioFileUrl = audioFileUrl;
     }
 
     await updatedSession.save();

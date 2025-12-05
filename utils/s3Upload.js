@@ -108,6 +108,22 @@ const deleteFromS3 = async (key) => {
   }
 };
 
+// Download file from S3
+const downloadFromS3 = async (key) => {
+  const params = {
+    Bucket: process.env.S3_BUCKET_NAME,
+    Key: key,
+  };
+
+  try {
+    const result = await s3.getObject(params).promise();
+    return result.Body; // Returns Buffer
+  } catch (error) {
+    console.error("S3 download error:", error);
+    throw new Error("Failed to download file from S3");
+  }
+};
+
 // Generate signed URL for file access
 const generateSignedUrl = async (key, expiresIn = 3600) => {
   const params = {
@@ -129,6 +145,7 @@ module.exports = {
   upload,
   uploadToS3,
   deleteFromS3,
+  downloadFromS3,
   generateSignedUrl,
   generateFileKey,
 };

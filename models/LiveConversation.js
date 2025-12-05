@@ -49,6 +49,19 @@ const liveConversationSchema = new mongoose.Schema(
       sampleRate: Number,
       channels: Number,
       detectedLanguages: [String], // Languages detected during the meeting
+      audioFileKey: String, // S3 key for the audio file
+      audioFileUrl: String, // S3 URL for the audio file
+      summaryRetryCount: {
+        type: Number,
+        default: 0,
+      },
+      summaryRetryAttempts: [
+        {
+          attemptedAt: Date,
+          success: Boolean,
+          error: String,
+        },
+      ],
     },
     summary: {
       generatedAt: Date,
