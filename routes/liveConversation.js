@@ -531,78 +531,105 @@ async function processSessionStop(sessionId) {
       summaryGenerationFailed = true;
     }
 
-    // If summary generation failed and we have audio in S3, retry
+    // If summary generation failed and we have audio in S3, retry with loop
     if (summaryGenerationFailed && !summary && audioFileKey) {
       const maxRetries = 3;
-      const currentRetryCount = (session.metadata?.summaryRetryCount || 0) + 1;
+      const initialRetryCount = session.metadata?.summaryRetryCount || 0;
 
-      if (currentRetryCount <= maxRetries) {
+      // Loop through retries until we succeed or reach max retries
+      for (let retryAttempt = 1; retryAttempt <= maxRetries; retryAttempt++) {
+        const currentRetryCount = initialRetryCount + retryAttempt;
+
         console.log(
-          `[STOP-BG] Summary generation failed, attempting retry ${currentRetryCount}/${maxRetries} using audio from S3`
+          `[STOP-BG] Summary generation failed, attempting retry ${retryAttempt}/${maxRetries} (total attempt ${currentRetryCount}) using audio from S3`
         );
 
         // Record retry attempt
         const updatedSession = await LiveConversation.findById(session._id);
-        if (updatedSession) {
-          if (!updatedSession.metadata) {
-            updatedSession.metadata = {};
-          }
-          updatedSession.metadata.summaryRetryCount = currentRetryCount;
-          if (!updatedSession.metadata.summaryRetryAttempts) {
-            updatedSession.metadata.summaryRetryAttempts = [];
-          }
-          updatedSession.metadata.summaryRetryAttempts.push({
-            attemptedAt: new Date(),
-            success: false,
-            error: "Initial summary generation failed, retrying...",
-          });
-          await updatedSession.save();
+        if (!updatedSession) {
+          console.error(
+            `[STOP-BG] Session ${session._id} not found during retry`
+          );
+          break;
         }
 
+        if (!updatedSession.metadata) {
+          updatedSession.metadata = {};
+        }
+        updatedSession.metadata.summaryRetryCount = currentRetryCount;
+        if (!updatedSession.metadata.summaryRetryAttempts) {
+          updatedSession.metadata.summaryRetryAttempts = [];
+        }
+
+        const retryAttemptRecord = {
+          attemptedAt: new Date(),
+          success: false,
+          error: null,
+        };
+        updatedSession.metadata.summaryRetryAttempts.push(retryAttemptRecord);
+        await updatedSession.save();
+
         // Wait a bit before retry (exponential backoff)
-        const delayMs = Math.min(
-          1000 * Math.pow(2, currentRetryCount - 1),
-          10000
-        );
+        const delayMs = Math.min(1000 * Math.pow(2, retryAttempt - 1), 10000);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
 
         // Retry summary generation
-        const retrySummary = await retrySummaryGeneration(
-          session._id.toString(),
-          audioFileKey,
-          totalDuration,
-          detectedLanguages,
-          session.startedAt,
-          session.pitchDeck.toString()
-        );
-
-        if (retrySummary && retrySummary.content) {
-          summary = retrySummary;
-          console.log(
-            `[STOP-BG] Summary generation succeeded on retry ${currentRetryCount}`
+        let retrySummary = null;
+        let retryError = null;
+        try {
+          retrySummary = await retrySummaryGeneration(
+            session._id.toString(),
+            audioFileKey,
+            totalDuration,
+            detectedLanguages,
+            session.startedAt,
+            session.pitchDeck.toString()
           );
-
-          // Update retry attempt record
-          const retrySession = await LiveConversation.findById(session._id);
-          if (retrySession && retrySession.metadata?.summaryRetryAttempts) {
-            const lastAttempt =
-              retrySession.metadata.summaryRetryAttempts[
-                retrySession.metadata.summaryRetryAttempts.length - 1
-              ];
-            if (lastAttempt) {
-              lastAttempt.success = true;
-              lastAttempt.error = null;
-            }
-            await retrySession.save();
-          }
-        } else {
-          console.warn(
-            `[STOP-BG] Retry ${currentRetryCount} failed to generate summary`
+        } catch (error) {
+          retryError = error;
+          console.error(
+            `[STOP-BG] Retry ${retryAttempt} threw an error:`,
+            error
           );
         }
-      } else {
+
+        // Update retry attempt record with result
+        const retrySession = await LiveConversation.findById(session._id);
+        if (retrySession && retrySession.metadata?.summaryRetryAttempts) {
+          const lastAttempt =
+            retrySession.metadata.summaryRetryAttempts[
+              retrySession.metadata.summaryRetryAttempts.length - 1
+            ];
+          if (lastAttempt) {
+            if (retrySummary && retrySummary.content) {
+              lastAttempt.success = true;
+              lastAttempt.error = null;
+              summary = retrySummary;
+              console.log(
+                `[STOP-BG] Summary generation succeeded on retry ${retryAttempt}`
+              );
+            } else {
+              lastAttempt.success = false;
+              lastAttempt.error = retryError
+                ? retryError.message || String(retryError)
+                : "Summary generation returned empty result";
+              console.warn(
+                `[STOP-BG] Retry ${retryAttempt} failed: ${lastAttempt.error}`
+              );
+            }
+          }
+          await retrySession.save();
+        }
+
+        // If we got a successful summary, break out of retry loop
+        if (summary && summary.content) {
+          break;
+        }
+      }
+
+      if (!summary) {
         console.warn(
-          `[STOP-BG] Maximum retry attempts (${maxRetries}) reached, giving up on summary generation`
+          `[STOP-BG] All ${maxRetries} retry attempts failed, giving up on summary generation`
         );
       }
     }
@@ -1647,6 +1674,262 @@ router.post(
     }
   }
 );
+
+/**
+ * Manually trigger summary generation retry for a session
+ * Useful when summary generation failed and you want to retry manually
+ */
+router.post(
+  "/:id/retry-summary",
+  authMiddleware,
+  requireSAOrAnalyst,
+  async (req, res) => {
+    try {
+      const session = await LiveConversation.findOne({
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      });
+
+      if (!session) {
+        return res.status(404).json({ message: "Session not found" });
+      }
+
+      // Check access for analysts
+      if (req.user.role === "ANALYST") {
+        const pitchDeck = await PitchDeck.findById(session.pitchDeck);
+        if (pitchDeck.uploadedBy.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ message: "Access denied" });
+        }
+      }
+
+      // Check if session has ended
+      if (session.status !== "ENDED") {
+        return res.status(400).json({
+          message: "Session must be ended before retrying summary generation",
+        });
+      }
+
+      // Check if audio file exists in S3
+      const audioFileKey = session.metadata?.audioFileKey;
+      if (!audioFileKey) {
+        return res.status(400).json({
+          message:
+            "No audio file found in S3. Cannot retry summary generation without audio.",
+        });
+      }
+
+      // Check if summary already exists
+      if (session.summary && session.summary.content) {
+        return res.status(400).json({
+          message: "Summary already exists for this session",
+          summary: session.summary,
+        });
+      }
+
+      const sessionIdString = session._id.toString();
+      console.log(
+        `[RETRY-SUMMARY-API] Manual retry triggered for session ${sessionIdString}`
+      );
+
+      // Calculate duration
+      const endedAt = session.endedAt || new Date();
+      const totalDuration = session.totalDuration
+        ? session.totalDuration
+        : Math.floor((endedAt - session.startedAt) / 1000);
+
+      const detectedLanguages = session.metadata?.detectedLanguages || [];
+
+      // Run retry in background
+      setImmediate(async () => {
+        try {
+          const maxRetries = 3;
+          const initialRetryCount = session.metadata?.summaryRetryCount || 0;
+          let summary = null;
+
+          // Loop through retries until we succeed or reach max retries
+          for (
+            let retryAttempt = 1;
+            retryAttempt <= maxRetries;
+            retryAttempt++
+          ) {
+            const currentRetryCount = initialRetryCount + retryAttempt;
+
+            console.log(
+              `[RETRY-SUMMARY-API] Attempting retry ${retryAttempt}/${maxRetries} (total attempt ${currentRetryCount}) for session ${sessionIdString}`
+            );
+
+            // Record retry attempt
+            const updatedSession = await LiveConversation.findById(session._id);
+            if (!updatedSession) {
+              console.error(
+                `[RETRY-SUMMARY-API] Session ${session._id} not found during retry`
+              );
+              break;
+            }
+
+            if (!updatedSession.metadata) {
+              updatedSession.metadata = {};
+            }
+            updatedSession.metadata.summaryRetryCount = currentRetryCount;
+            if (!updatedSession.metadata.summaryRetryAttempts) {
+              updatedSession.metadata.summaryRetryAttempts = [];
+            }
+
+            const retryAttemptRecord = {
+              attemptedAt: new Date(),
+              success: false,
+              error: null,
+              triggeredBy: "manual_api",
+              triggeredByUser: req.user._id.toString(),
+            };
+            updatedSession.metadata.summaryRetryAttempts.push(
+              retryAttemptRecord
+            );
+            await updatedSession.save();
+
+            // Wait a bit before retry (exponential backoff)
+            const delayMs = Math.min(
+              1000 * Math.pow(2, retryAttempt - 1),
+              10000
+            );
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+            // Retry summary generation
+            let retrySummary = null;
+            let retryError = null;
+            try {
+              retrySummary = await retrySummaryGeneration(
+                session._id.toString(),
+                audioFileKey,
+                totalDuration,
+                detectedLanguages,
+                session.startedAt,
+                session.pitchDeck.toString()
+              );
+            } catch (error) {
+              retryError = error;
+              console.error(
+                `[RETRY-SUMMARY-API] Retry ${retryAttempt} threw an error:`,
+                error
+              );
+            }
+
+            // Update retry attempt record with result
+            const retrySession = await LiveConversation.findById(session._id);
+            if (retrySession && retrySession.metadata?.summaryRetryAttempts) {
+              const lastAttempt =
+                retrySession.metadata.summaryRetryAttempts[
+                  retrySession.metadata.summaryRetryAttempts.length - 1
+                ];
+              if (lastAttempt) {
+                if (retrySummary && retrySummary.content) {
+                  lastAttempt.success = true;
+                  lastAttempt.error = null;
+                  summary = retrySummary;
+                  console.log(
+                    `[RETRY-SUMMARY-API] Summary generation succeeded on retry ${retryAttempt}`
+                  );
+
+                  // Save summary to session
+                  retrySession.summary = {
+                    generatedAt: new Date(),
+                    content: retrySummary.content,
+                    keyTopics: retrySummary.keyTopics || [],
+                    participants: retrySummary.participants || [],
+                    duration: totalDuration,
+                  };
+                  await retrySession.save();
+
+                  // Save transcript summary to conversation history
+                  try {
+                    const transcriptCount =
+                      await ConversationTranscript.countDocuments({
+                        liveConversation: session._id,
+                      });
+
+                    if (transcriptCount > 0) {
+                      const PitchDeckMessage = require("../models/PitchDeckMessage");
+                      await PitchDeckMessage.create({
+                        pitchDeck: retrySession.pitchDeck,
+                        author: retrySession.createdBy,
+                        organization: retrySession.organization,
+                        userQuery: `[Live Conversation Session: ${
+                          retrySession.title || "Untitled"
+                        }] - Summary regenerated`,
+                        attachments: [],
+                        aiResponse: {
+                          responseType: "conversational",
+                          response: {
+                            answer: `Meeting Summary:\n\n${retrySummary.content}\n\nFull transcript available in session details.`,
+                            reference: "live_conversation",
+                          },
+                        },
+                        responseType: "conversational",
+                        requiresAnalysisUpdate: false,
+                        analysisVersion: 1,
+                        metadata: {
+                          liveSessionId: retrySession._id.toString(),
+                          transcriptCount: transcriptCount,
+                          duration: totalDuration,
+                          summaryGenerated: true,
+                          regenerated: true,
+                        },
+                      });
+                    }
+                  } catch (historyError) {
+                    console.error(
+                      "[RETRY-SUMMARY-API] Error saving transcript to conversation history:",
+                      historyError
+                    );
+                  }
+                } else {
+                  lastAttempt.success = false;
+                  lastAttempt.error = retryError
+                    ? retryError.message || String(retryError)
+                    : "Summary generation returned empty result";
+                  console.warn(
+                    `[RETRY-SUMMARY-API] Retry ${retryAttempt} failed: ${lastAttempt.error}`
+                  );
+                }
+              }
+              await retrySession.save();
+            }
+
+            // If we got a successful summary, break out of retry loop
+            if (summary && summary.content) {
+              break;
+            }
+          }
+
+          if (!summary) {
+            console.warn(
+              `[RETRY-SUMMARY-API] All ${maxRetries} retry attempts failed for session ${sessionIdString}`
+            );
+          }
+        } catch (error) {
+          console.error(
+            `[RETRY-SUMMARY-API] Error during manual retry:`,
+            error
+          );
+        }
+      });
+
+      res.json({
+        message: "Summary generation retry triggered",
+        sessionId: session._id.toString(),
+        status: "processing",
+        maxRetries: 3,
+        currentRetryCount: session.metadata?.summaryRetryCount || 0,
+        audioFileKey: audioFileKey,
+      });
+    } catch (error) {
+      console.error("Retry summary error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
 /**
  * Setup WebSocket handlers for live conversations
  */
