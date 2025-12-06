@@ -482,6 +482,14 @@ async function processSessionStop(sessionId) {
             console.log(
               "[STOP-BG] Generating meeting summary from complete audio..."
             );
+            // Set state to generating
+            const generatingSession = await LiveConversation.findById(
+              session._id
+            );
+            if (generatingSession) {
+              generatingSession.summaryState = "generating";
+              await generatingSession.save();
+            }
             try {
               summary = await generateMeetingSummary(
                 session._id.toString(),
@@ -631,6 +639,12 @@ async function processSessionStop(sessionId) {
         console.warn(
           `[STOP-BG] All ${maxRetries} retry attempts failed, giving up on summary generation`
         );
+        // Update state to failed
+        const failedSession = await LiveConversation.findById(session._id);
+        if (failedSession) {
+          failedSession.summaryState = "failed";
+          await failedSession.save();
+        }
       }
     }
 
@@ -668,6 +682,9 @@ async function processSessionStop(sessionId) {
         participants: summary.participants || [],
         duration: totalDuration,
       };
+      updatedSession.summaryState = "completed";
+    } else {
+      updatedSession.summaryState = "failed";
     }
 
     // Ensure metadata object exists
@@ -1272,6 +1289,7 @@ router.get("/:id", authMiddleware, requireSAOrAnalyst, async (req, res) => {
       transcriptCount: session.transcriptCount,
       suggestionCount: session.suggestionCount,
       summary: session.summary || null,
+      summaryState: session.summaryState || "pending",
       detectedLanguages: session.metadata?.detectedLanguages || [],
     });
   } catch (error) {
@@ -1593,6 +1611,7 @@ router.get(
           transcriptCount: s.transcriptCount,
           suggestionCount: s.suggestionCount,
           summary: s.summary || null,
+          summaryState: s.summaryState || "pending",
           detectedLanguages: s.metadata?.detectedLanguages || [],
         })),
       });
@@ -1652,6 +1671,7 @@ router.post(
       session.totalDuration = Math.floor(
         (session.endedAt.getTime() - session.startedAt.getTime()) / 1000
       );
+      session.summaryState = "pending";
       await session.save();
 
       // Kick off background processing
@@ -1739,6 +1759,10 @@ router.post(
         : Math.floor((endedAt - session.startedAt) / 1000);
 
       const detectedLanguages = session.metadata?.detectedLanguages || [];
+
+      // Set state to generating
+      session.summaryState = "generating";
+      await session.save();
 
       // Run retry in background
       setImmediate(async () => {
@@ -1839,6 +1863,7 @@ router.post(
                     participants: retrySummary.participants || [],
                     duration: totalDuration,
                   };
+                  retrySession.summaryState = "completed";
                   await retrySession.save();
 
                   // Save transcript summary to conversation history
@@ -1906,6 +1931,12 @@ router.post(
             console.warn(
               `[RETRY-SUMMARY-API] All ${maxRetries} retry attempts failed for session ${sessionIdString}`
             );
+            // Update state to failed
+            const failedSession = await LiveConversation.findById(session._id);
+            if (failedSession) {
+              failedSession.summaryState = "failed";
+              await failedSession.save();
+            }
           }
         } catch (error) {
           console.error(

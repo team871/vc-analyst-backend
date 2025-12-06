@@ -70,6 +70,11 @@ const liveConversationSchema = new mongoose.Schema(
       participants: [String], // Speaker IDs or names
       duration: Number, // Duration in seconds
     },
+    summaryState: {
+      type: String,
+      enum: ["pending", "generating", "completed", "failed"],
+      default: "pending",
+    },
     isActive: {
       type: Boolean,
       default: true,
