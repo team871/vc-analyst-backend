@@ -1753,13 +1753,7 @@ router.post(
         });
       }
 
-      // Check if summary already exists
-      if (session.summary && session.summary.content) {
-        return res.status(400).json({
-          message: "Summary already exists for this session",
-          summary: session.summary,
-        });
-      }
+      // Allow regenerating summary even if one already exists
 
       const sessionIdString = session._id.toString();
       console.log(
