@@ -374,98 +374,96 @@ async function processSessionStop(sessionId) {
         );
         summaryGenerationFailed = true;
       } else if (completeAudioRecording && completeAudioRecording.length > 0) {
+        const audioDuration = completeAudioRecording.length / (16000 * 2); // seconds
         console.log(
-          `[STOP-BG] Transcribing complete audio recording for session ${session._id}...`
+          `[STOP-BG] Transcribing complete audio recording for session ${session._id}... ` +
+            `(${(completeAudioRecording.length / 1024 / 1024).toFixed(
+              2
+            )}MB, ~${audioDuration.toFixed(2)}s)`
         );
 
-        try {
-          const completeTranscription = await transcribeCompleteAudio(
-            completeAudioRecording,
-            {
-              model: "gpt-4o-transcribe-diarize",
-              language: null,
-              sample_rate: 16000,
-            }
+        // Validate audio buffer before transcription
+        if (completeAudioRecording.length < 16000 * 2 * 0.25) {
+          console.error(
+            `[STOP-BG] Audio buffer too small: ${
+              completeAudioRecording.length
+            } bytes (~${audioDuration.toFixed(2)}s). Minimum required: ~0.25s`
           );
-
-          // Extract detected language
-          if (completeTranscription.language) {
-            detectedLanguages = [completeTranscription.language];
-          }
-
-          // Convert OpenAI transcription to transcript format and save to database
-          if (completeTranscription && completeTranscription.segments) {
-            completeTranscripts = await Promise.all(
-              completeTranscription.segments.map(async (segment) => {
-                let speakerId = null;
-                if (segment.speaker) {
-                  const parsed = parseInt(
-                    segment.speaker.replace("SPEAKER_", ""),
-                    10
-                  );
-                  if (!isNaN(parsed) && isFinite(parsed)) {
-                    speakerId = parsed;
-                  }
-                }
-
-                const transcriptData = {
-                  text: segment.text || "",
-                  timestamp: segment.start
-                    ? new Date(
-                        session.startedAt.getTime() + segment.start * 1000
-                      )
-                    : new Date(),
-                  speaker: speakerId !== null ? `Speaker ${speakerId}` : null,
-                  speakerId: speakerId,
-                  isFinal: true,
-                  metadata: {
-                    confidence: 1.0,
-                    languageCode: completeTranscription.language || null,
-                  },
-                };
-
-                // Save transcript to database
-                const transcriptEntry = new ConversationTranscript({
-                  liveConversation: session._id,
-                  pitchDeck: session.pitchDeck,
-                  timestamp: transcriptData.timestamp,
-                  text: transcriptData.text,
-                  speaker: transcriptData.speaker,
-                  speakerId: transcriptData.speakerId,
-                  isFinal: transcriptData.isFinal,
-                  metadata: transcriptData.metadata,
-                });
-
-                await transcriptEntry.save();
-                return transcriptData;
-              })
-            );
-
-            console.log(
-              `[STOP-BG] Complete audio transcription: ${completeTranscripts.length} segments saved`
-            );
-          } else if (completeTranscription && completeTranscription.text) {
-            // Fallback: single text response
-            const transcriptEntry = new ConversationTranscript({
-              liveConversation: session._id,
-              pitchDeck: session.pitchDeck,
-              timestamp: session.startedAt,
-              text: completeTranscription.text,
-              speaker: null,
-              speakerId: null,
-              isFinal: true,
-              metadata: {
-                confidence: 1.0,
-                languageCode: completeTranscription.language || null,
-              },
-            });
-
-            await transcriptEntry.save();
-
-            completeTranscripts = [
+          summaryGenerationFailed = true;
+        } else {
+          try {
+            const completeTranscription = await transcribeCompleteAudio(
+              completeAudioRecording,
               {
-                text: completeTranscription.text,
+                model: "gpt-4o-transcribe-diarize",
+                language: null,
+                sample_rate: 16000,
+              }
+            );
+
+            // Extract detected language
+            if (completeTranscription.language) {
+              detectedLanguages = [completeTranscription.language];
+            }
+
+            // Convert OpenAI transcription to transcript format and save to database
+            if (completeTranscription && completeTranscription.segments) {
+              completeTranscripts = await Promise.all(
+                completeTranscription.segments.map(async (segment) => {
+                  let speakerId = null;
+                  if (segment.speaker) {
+                    const parsed = parseInt(
+                      segment.speaker.replace("SPEAKER_", ""),
+                      10
+                    );
+                    if (!isNaN(parsed) && isFinite(parsed)) {
+                      speakerId = parsed;
+                    }
+                  }
+
+                  const transcriptData = {
+                    text: segment.text || "",
+                    timestamp: segment.start
+                      ? new Date(
+                          session.startedAt.getTime() + segment.start * 1000
+                        )
+                      : new Date(),
+                    speaker: speakerId !== null ? `Speaker ${speakerId}` : null,
+                    speakerId: speakerId,
+                    isFinal: true,
+                    metadata: {
+                      confidence: 1.0,
+                      languageCode: completeTranscription.language || null,
+                    },
+                  };
+
+                  // Save transcript to database
+                  const transcriptEntry = new ConversationTranscript({
+                    liveConversation: session._id,
+                    pitchDeck: session.pitchDeck,
+                    timestamp: transcriptData.timestamp,
+                    text: transcriptData.text,
+                    speaker: transcriptData.speaker,
+                    speakerId: transcriptData.speakerId,
+                    isFinal: transcriptData.isFinal,
+                    metadata: transcriptData.metadata,
+                  });
+
+                  await transcriptEntry.save();
+                  return transcriptData;
+                })
+              );
+
+              console.log(
+                `[STOP-BG] Complete audio transcription: ${completeTranscripts.length} segments saved`
+              );
+            } else if (completeTranscription && completeTranscription.text) {
+              // Fallback: single text response
+              const transcriptEntry = new ConversationTranscript({
+                liveConversation: session._id,
+                pitchDeck: session.pitchDeck,
                 timestamp: session.startedAt,
+                text: completeTranscription.text,
                 speaker: null,
                 speakerId: null,
                 isFinal: true,
@@ -473,60 +471,76 @@ async function processSessionStop(sessionId) {
                   confidence: 1.0,
                   languageCode: completeTranscription.language || null,
                 },
-              },
-            ];
-          }
+              });
 
-          // Generate summary from complete audio transcription
-          if (completeTranscripts.length > 0) {
-            console.log(
-              "[STOP-BG] Generating meeting summary from complete audio..."
-            );
-            // Set state to generating
-            const generatingSession = await LiveConversation.findById(
-              session._id
-            );
-            if (generatingSession) {
-              generatingSession.summaryState = "generating";
-              await generatingSession.save();
+              await transcriptEntry.save();
+
+              completeTranscripts = [
+                {
+                  text: completeTranscription.text,
+                  timestamp: session.startedAt,
+                  speaker: null,
+                  speakerId: null,
+                  isFinal: true,
+                  metadata: {
+                    confidence: 1.0,
+                    languageCode: completeTranscription.language || null,
+                  },
+                },
+              ];
             }
-            try {
-              summary = await generateMeetingSummary(
-                session._id.toString(),
-                session.pitchDeck.toString(),
-                completeTranscripts,
-                totalDuration,
-                detectedLanguages
+
+            // Generate summary from complete audio transcription
+            if (completeTranscripts.length > 0) {
+              console.log(
+                "[STOP-BG] Generating meeting summary from complete audio..."
               );
-              if (summary && summary.content) {
-                console.log(
-                  "[STOP-BG] Meeting summary generated successfully from complete audio."
+              // Set state to generating
+              const generatingSession = await LiveConversation.findById(
+                session._id
+              );
+              if (generatingSession) {
+                generatingSession.summaryState = "generating";
+                await generatingSession.save();
+              }
+              try {
+                summary = await generateMeetingSummary(
+                  session._id.toString(),
+                  session.pitchDeck.toString(),
+                  completeTranscripts,
+                  totalDuration,
+                  detectedLanguages
                 );
-              } else {
-                console.warn(
-                  "[STOP-BG] Summary generation returned empty result"
+                if (summary && summary.content) {
+                  console.log(
+                    "[STOP-BG] Meeting summary generated successfully from complete audio."
+                  );
+                } else {
+                  console.warn(
+                    "[STOP-BG] Summary generation returned empty result"
+                  );
+                  summaryGenerationFailed = true;
+                }
+              } catch (summaryError) {
+                console.error(
+                  "[STOP-BG] Error generating meeting summary:",
+                  summaryError
                 );
                 summaryGenerationFailed = true;
               }
-            } catch (summaryError) {
-              console.error(
-                "[STOP-BG] Error generating meeting summary:",
-                summaryError
+            } else {
+              console.warn(
+                "[STOP-BG] No transcripts available for summary generation"
               );
               summaryGenerationFailed = true;
             }
-          } else {
-            console.warn(
-              "[STOP-BG] No transcripts available for summary generation"
+          } catch (transcriptionError) {
+            console.error(
+              "[STOP-BG] Error transcribing complete audio:",
+              transcriptionError
             );
             summaryGenerationFailed = true;
           }
-        } catch (audioError) {
-          console.error(
-            "[STOP-BG] Error transcribing complete audio:",
-            audioError
-          );
-          summaryGenerationFailed = true;
         }
       } else {
         console.warn(

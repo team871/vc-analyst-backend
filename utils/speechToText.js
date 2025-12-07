@@ -258,6 +258,14 @@ function createLiveTranscription(options = {}, onTranscript, onError) {
  * @returns {Array<Buffer>} Array of PCM chunks
  */
 function splitPcmIntoChunks(pcmBuffer, sampleRate = 16000) {
+  // Validate input buffer
+  if (!pcmBuffer || pcmBuffer.length === 0) {
+    throw new Error("Cannot split empty or invalid PCM buffer");
+  }
+
+  // Minimum chunk size: ~1 second of audio (sample_rate * 2 bytes)
+  const MIN_CHUNK_SIZE = sampleRate * 2; // ~32000 bytes for 16kHz
+  
   // WAV header is 44 bytes
   // Target max WAV size: 20MB (safe margin under 25MB limit)
   const MAX_WAV_SIZE = 20 * 1024 * 1024; // 20MB
@@ -269,9 +277,23 @@ function splitPcmIntoChunks(pcmBuffer, sampleRate = 16000) {
 
   while (offset < pcmBuffer.length) {
     const remaining = pcmBuffer.length - offset;
-    const chunkSize = Math.min(remaining, MAX_PCM_SIZE_PER_CHUNK);
+    let chunkSize = Math.min(remaining, MAX_PCM_SIZE_PER_CHUNK);
+    
+    // Ensure last chunk meets minimum size, or merge with previous chunk
+    if (remaining < MIN_CHUNK_SIZE && chunks.length > 0) {
+      // Merge last small chunk with previous chunk
+      const lastChunk = chunks.pop();
+      offset -= lastChunk.length;
+      chunkSize = remaining + lastChunk.length;
+    } else if (remaining < MIN_CHUNK_SIZE && chunks.length === 0) {
+      // If entire buffer is too small, use it anyway (will be validated in transcribeAudioChunk)
+      chunkSize = remaining;
+    }
+    
     const chunk = pcmBuffer.slice(offset, offset + chunkSize);
-    chunks.push(chunk);
+    if (chunk.length > 0) {
+      chunks.push(chunk);
+    }
     offset += chunkSize;
   }
 
@@ -329,6 +351,15 @@ async function transcribeAudioChunk(pcmChunk, options = {}, maxRetries = 3) {
     language = null,
     sample_rate = 16000,
   } = options;
+
+  // Validate chunk size - OpenAI requires minimum audio duration
+  // Minimum: ~0.25 seconds of audio (sample_rate * 2 bytes * 0.25)
+  const MIN_CHUNK_SIZE = sample_rate * 2 * 0.25; // ~8000 bytes for 16kHz
+  if (!pcmChunk || pcmChunk.length < MIN_CHUNK_SIZE) {
+    throw new Error(
+      `Audio chunk too small: ${pcmChunk?.length || 0} bytes (minimum: ${MIN_CHUNK_SIZE} bytes)`
+    );
+  }
 
   const wavBuffer = pcmToWav(pcmChunk, sample_rate);
 
@@ -524,6 +555,19 @@ async function transcribeCompleteAudio(audioBuffer, options = {}) {
   } = options;
 
   try {
+    // Validate audio buffer
+    if (!audioBuffer || audioBuffer.length === 0) {
+      throw new Error("Audio buffer is empty or invalid");
+    }
+
+    // Minimum audio duration: ~0.25 seconds
+    const MIN_AUDIO_SIZE = sample_rate * 2 * 0.25; // ~8000 bytes for 16kHz
+    if (audioBuffer.length < MIN_AUDIO_SIZE) {
+      throw new Error(
+        `Audio buffer too small: ${audioBuffer.length} bytes (minimum: ${MIN_AUDIO_SIZE} bytes for ~0.25 seconds)`
+      );
+    }
+
     const wavBuffer = pcmToWav(audioBuffer, sample_rate);
     const fileSizeMB = wavBuffer.length / 1024 / 1024;
 
@@ -623,11 +667,27 @@ async function transcribeCompleteAudio(audioBuffer, options = {}) {
     const failedChunks = [];
     
     for (let i = 0; i < chunks.length; i++) {
+      const chunkWavSize = pcmToWav(chunks[i], sample_rate).length;
+      const chunkDuration = chunks[i].length / (sample_rate * 2); // seconds
+      
       console.log(
-        `Transcribing chunk ${i + 1}/${chunks.length} (${(
-          (pcmToWav(chunks[i], sample_rate).length / 1024 / 1024)
-        ).toFixed(2)}MB)...`
+        `Transcribing chunk ${i + 1}/${chunks.length} (${(chunkWavSize / 1024 / 1024).toFixed(2)}MB, ${chunkDuration.toFixed(2)}s, ${chunks[i].length} bytes PCM)...`
       );
+
+      // Additional validation before transcription
+      if (chunks[i].length < sample_rate * 2 * 0.25) {
+        console.warn(
+          `Chunk ${i + 1} is too small (${chunks[i].length} bytes, ~${chunkDuration.toFixed(2)}s). Skipping...`
+        );
+        failedChunks.push(i + 1);
+        chunkResults.push({
+          text: `[Chunk ${i + 1} too small to transcribe]`,
+          segments: [],
+          duration: chunkDuration,
+          language: null,
+        });
+        continue;
+      }
 
       try {
         const chunkResult = await transcribeAudioChunk(chunks[i], {
