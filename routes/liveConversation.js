@@ -79,9 +79,24 @@ async function retrySummaryGeneration(
       ).toFixed(2)}MB`
     );
 
+    // Check if file is WAV format (starts with "RIFF" header)
+    // If it's WAV, extract PCM data by removing WAV header (44 bytes)
+    let pcmBuffer = audioBuffer;
+    if (
+      audioBuffer.length > 44 &&
+      audioBuffer.toString("ascii", 0, 4) === "RIFF"
+    ) {
+      console.log(`[RETRY-SUMMARY] Detected WAV format, extracting PCM data`);
+      // WAV header is 44 bytes, PCM data starts at offset 44
+      pcmBuffer = audioBuffer.slice(44);
+    }
+
+    // Transcribe audio (transcribeCompleteAudio expects PCM and will convert to WAV)
     // Transcribe audio
-    const completeTranscription = await transcribeCompleteAudio(audioBuffer, {
-      model: "gpt-4o-transcribe-diarize",
+    // Note: model parameter is OpenAI-specific, model_id is for ElevenLabs
+    const completeTranscription = await transcribeCompleteAudio(pcmBuffer, {
+      model: "gpt-4o-transcribe-diarize", // OpenAI model
+      model_id: "scribe_v1", // ElevenLabs model (required if using ElevenLabs)
       language: null,
       sample_rate: 16000,
     });
@@ -276,22 +291,30 @@ async function processSessionStop(sessionId) {
         );
 
         // Save audio to S3 before processing
+        // Convert PCM to WAV format for better compatibility and correct file format
         try {
           if (!audioFileKey) {
-            // Generate S3 key for audio file
+            const { pcmToWav } = require("../utils/speechToText");
+            const wavBuffer = pcmToWav(completeAudioRecording, 16000);
+
+            // Generate S3 key for audio file (use .wav extension)
             audioFileKey = generateFileKey(
-              `session-${sessionIdString}.webm`,
+              `session-${sessionIdString}.wav`,
               session.organization.toString(),
               "live-conversation-audio"
             );
 
             console.log(
-              `[STOP-BG] Uploading audio to S3 with key: ${audioFileKey}`
+              `[STOP-BG] Uploading audio to S3 with key: ${audioFileKey} (${(
+                wavBuffer.length /
+                1024 /
+                1024
+              ).toFixed(2)}MB WAV)`
             );
             audioFileUrl = await uploadToS3(
-              completeAudioRecording,
+              wavBuffer,
               audioFileKey,
-              "audio/webm"
+              "audio/wav"
             );
             console.log(
               `[STOP-BG] Audio uploaded to S3 successfully: ${audioFileUrl}`
@@ -338,14 +361,28 @@ async function processSessionStop(sessionId) {
           `[STOP-BG] Attempting to download audio from S3 (key: ${audioFileKey})`
         );
         try {
-          completeAudioRecording = await downloadFromS3(audioFileKey);
+          const downloadedAudio = await downloadFromS3(audioFileKey);
           console.log(
             `[STOP-BG] Downloaded audio from S3: ${(
-              completeAudioRecording.length /
+              downloadedAudio.length /
               1024 /
               1024
             ).toFixed(2)}MB`
           );
+
+          // Check if file is WAV format (starts with "RIFF" header)
+          // If it's WAV, extract PCM data by removing WAV header (44 bytes)
+          if (
+            downloadedAudio.length > 44 &&
+            downloadedAudio.toString("ascii", 0, 4) === "RIFF"
+          ) {
+            console.log(`[STOP-BG] Detected WAV format, extracting PCM data`);
+            // WAV header is 44 bytes, PCM data starts at offset 44
+            completeAudioRecording = downloadedAudio.slice(44);
+          } else {
+            // Assume PCM format (for backward compatibility with old files)
+            completeAudioRecording = downloadedAudio;
+          }
         } catch (downloadError) {
           console.error(
             `[STOP-BG] Failed to download audio from S3:`,
@@ -395,7 +432,8 @@ async function processSessionStop(sessionId) {
             const completeTranscription = await transcribeCompleteAudio(
               completeAudioRecording,
               {
-                model: "gpt-4o-transcribe-diarize",
+                model: "gpt-4o-transcribe-diarize", // OpenAI model
+                model_id: "scribe_v1", // ElevenLabs model (required if using ElevenLabs)
                 language: null,
                 sample_rate: 16000,
               }
