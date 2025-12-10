@@ -19,19 +19,40 @@ const {
 } = require("../utils/s3Upload");
 const OpenAI = require("openai");
 const { tryParseJson, stripCodeFences } = require("../utils/helpers");
+const { logMeetingStarted, logMeetingEnded } = require("../utils/auditLogger");
+const { getOrganizationApiKey } = require("../utils/organizationApiKeys");
 
-// Initialize OpenAI client
-let openaiClient = null;
-function getOpenAIClient() {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY not set. AI features will not work.");
+// Initialize OpenAI client with organization-specific API key
+let openaiClients = new Map(); // Cache clients per organization
+
+async function getOpenAIClient(organizationId) {
+  if (!organizationId) {
+    // Fallback to environment variable
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error(
+        "OpenAI API key not configured. Please set it in API Settings or environment variable."
+      );
+    }
+    return new OpenAI({ apiKey });
   }
-  if (!openaiClient) {
-    openaiClient = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
+
+  // Check cache first
+  if (openaiClients.has(organizationId.toString())) {
+    return openaiClients.get(organizationId.toString());
   }
-  return openaiClient;
+
+  // Get organization-specific API key
+  const apiKey = await getOrganizationApiKey(organizationId, "openai");
+  if (!apiKey) {
+    throw new Error(
+      "OpenAI API key not configured. Please set it in API Settings."
+    );
+  }
+
+  const client = new OpenAI({ apiKey });
+  openaiClients.set(organizationId.toString(), client);
+  return client;
 }
 
 const router = express.Router();
@@ -223,7 +244,8 @@ async function retrySummaryGeneration(
         pitchDeckId,
         completeTranscripts,
         totalDuration,
-        detectedLanguages
+        detectedLanguages,
+        session.organization?.toString() || null
       );
       console.log(`[RETRY-SUMMARY] Successfully generated summary on retry`);
       return summary;
@@ -547,7 +569,8 @@ async function processSessionStop(sessionId) {
                   session.pitchDeck.toString(),
                   completeTranscripts,
                   totalDuration,
-                  detectedLanguages
+                  detectedLanguages,
+                  session.organization?.toString() || null
                 );
                 if (summary && summary.content) {
                   console.log(
@@ -726,6 +749,25 @@ async function processSessionStop(sessionId) {
     updatedSession.totalDuration = totalDuration;
     updatedSession.transcriptCount = transcriptCount;
 
+    await updatedSession.save();
+
+    // Log audit trail for meeting end
+    const pitchDeckId = updatedSession.pitchDeck?.toString() || null;
+    const userId = updatedSession.createdBy?.toString() || null;
+    const organizationId = updatedSession.organization?.toString() || null;
+
+    if (pitchDeckId && userId && organizationId) {
+      await logMeetingEnded(
+        updatedSession._id,
+        pitchDeckId,
+        userId,
+        organizationId,
+        updatedSession.title || "Meeting",
+        totalDuration,
+        null // req not available in this context
+      );
+    }
+
     if (summary) {
       updatedSession.summary = {
         generatedAt: new Date(),
@@ -810,9 +852,10 @@ async function processSessionStop(sessionId) {
  * Detect speaker name from introduction text
  * @param {string} text - The transcript text
  * @param {number} speakerId - The speaker ID
+ * @param {string} organizationId - Organization ID for API key lookup
  * @returns {Promise<string|null>} Detected name or null
  */
-async function detectSpeakerName(text, speakerId) {
+async function detectSpeakerName(text, speakerId, organizationId) {
   try {
     // Common introduction patterns
     const introPatterns = [
@@ -849,7 +892,7 @@ Statement: "${text}"
 Name:`;
 
       try {
-        const client = getOpenAIClient();
+        const client = await getOpenAIClient(organizationId);
         const completion = await client.chat.completions.create({
           model: "gpt-4o", // Using GPT-4o for name extraction
           messages: [
@@ -949,7 +992,7 @@ Respond with ONLY a JSON object:
   "reason": "Brief explanation"
 }`;
 
-        const client = getOpenAIClient();
+        const client = await getOpenAIClient(req.user.organization._id);
         const completion = await client.chat.completions.create({
           model: "gpt-4o", // Using GPT-4o for question analysis
           messages: [
@@ -995,7 +1038,8 @@ async function generateMeetingSummary(
   pitchDeckId,
   transcripts,
   duration,
-  detectedLanguages = []
+  detectedLanguages = [],
+  organizationId = null
 ) {
   try {
     if (!transcripts || transcripts.length === 0) {
@@ -1096,7 +1140,7 @@ Return your response as a JSON object with this structure:
 Output valid JSON only.`;
 
     // Call OpenAI
-    const client = getOpenAIClient();
+    const client = await getOpenAIClient(organizationId);
     const completion = await client.chat.completions.create({
       model: "gpt-4o", // Using GPT-4o for comprehensive meeting summaries
       messages: [
@@ -1275,6 +1319,16 @@ router.post(
       });
 
       await liveConversation.save();
+
+      // Log audit trail
+      await logMeetingStarted(
+        liveConversation._id,
+        pitchDeckId,
+        req.user._id,
+        req.user.organization._id,
+        liveConversation.title,
+        req
+      );
 
       // Generate WebSocket token (JWT with session info)
       const jwt = require("jsonwebtoken");

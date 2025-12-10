@@ -31,14 +31,21 @@ async function analyzeThesisInBackground({
   encodedFile,
   originalFileName,
   fileSize,
+  model = "sonar-pro", // Default to sonar-pro, allow deep-research for higher quality
 }) {
   try {
-    console.log(`[THESIS-BG] Starting background analysis for thesis ${thesisId}`);
+    console.log(
+      `[THESIS-BG] Starting background analysis for thesis ${thesisId} using model: ${model}`
+    );
+
+    // Validate model selection
+    const validModels = ["sonar-pro", "deep-research"];
+    const selectedModel = validModels.includes(model) ? model : "sonar-pro";
 
     let aiContent = "";
     try {
       const completion = await perplexity.chat.completions.create({
-        model: "sonar-pro",
+        model: selectedModel,
         messages: [
           {
             role: "user",
@@ -132,7 +139,7 @@ Keep tone professional, clear, and investor-grade. Output valid JSON only.`,
             fileSize,
             uploadDate: new Date(),
             analysisDate: new Date(),
-            aiModel: "sonar-pro",
+            aiModel: selectedModel,
           },
         },
       },
@@ -141,10 +148,7 @@ Keep tone professional, clear, and investor-grade. Output valid JSON only.`,
 
     console.log(`[THESIS-BG] Analysis completed for thesis ${thesisId}`);
   } catch (error) {
-    console.error(
-      `[THESIS-BG] Thesis analysis error for ${thesisId}:`,
-      error
-    );
+    console.error(`[THESIS-BG] Thesis analysis error for ${thesisId}:`, error);
     // In case of failure, leave thesis record as-is; frontend can show generic error message
   }
 }
@@ -162,10 +166,15 @@ router.post(
         return res.status(400).json({ message: "No file uploaded" });
       }
 
-      const { title } = req.body;
+      const { title, model } = req.body;
       if (!title) {
         return res.status(400).json({ message: "Title is required" });
       }
+
+      // Validate and set model (default to sonar-pro)
+      const validModels = ["sonar-pro", "deep-research"];
+      const selectedModel =
+        model && validModels.includes(model) ? model : "sonar-pro";
 
       // Convert to base64 for in-memory analysis (no storage)
       const encodedFile = req.file.buffer.toString("base64");
@@ -185,7 +194,7 @@ router.post(
           fileSize: req.file.size,
           uploadDate: new Date(),
           analysisDate: null,
-          aiModel: "sonar-pro",
+          aiModel: selectedModel,
         },
       });
 
@@ -201,6 +210,7 @@ router.post(
           encodedFile,
           originalFileName: req.file.originalname,
           fileSize: req.file.size,
+          model: selectedModel,
         }).catch((err) => {
           console.error(
             `[THESIS] Background analysis failed for thesis ${thesis._id}:`,
@@ -297,11 +307,19 @@ router.put(
 
       // If new file is uploaded (analyze in-memory, no storage) - run in background
       if (req.file) {
+        // Validate and set model (default to sonar-pro, or use existing model)
+        const validModels = ["sonar-pro", "deep-research"];
+        const selectedModel =
+          req.body.model && validModels.includes(req.body.model)
+            ? req.body.model
+            : thesis.metadata?.aiModel || "sonar-pro";
+
         updateData.metadata = {
           ...thesis.metadata,
           fileSize: req.file.size,
           uploadDate: new Date(),
           analysisDate: null,
+          aiModel: selectedModel,
         };
 
         const encodedFile = req.file.buffer.toString("base64");
@@ -315,6 +333,7 @@ router.put(
             encodedFile,
             originalFileName: req.file.originalname,
             fileSize: req.file.size,
+            model: selectedModel,
           }).catch((err) => {
             console.error(
               `[THESIS] Background re-analysis failed for thesis ${thesis._id}:`,

@@ -5,6 +5,7 @@ const Thesis = require("../models/Thesis");
 const Comment = require("../models/Comment");
 const PitchDeckMessage = require("../models/PitchDeckMessage");
 const SupportingDocument = require("../models/SupportingDocument");
+const DataRoomDocument = require("../models/DataRoomDocument");
 const { authMiddleware, requireSAOrAnalyst } = require("../middleware/auth");
 const {
   upload,
@@ -12,16 +13,39 @@ const {
   generateFileKey,
   generateSignedUrl,
 } = require("../utils/s3Upload");
+const multer = require("multer");
 const Perplexity = require("@perplexity-ai/perplexity_ai");
 const fs = require("fs");
 const { tryParseJson, stripCodeFences } = require("../utils/helpers");
+const { generateDocumentSummary } = require("../utils/documentSummary");
+const {
+  logPitchDeckUpload,
+  logPitchDeckStatusChange,
+  logCommentAdded,
+  logDataRoomDocumentUploaded,
+  logChatMessage,
+  logPitchDeckDeleted,
+} = require("../utils/auditLogger");
 
 const router = express.Router();
-const perplexity = new Perplexity({
-  apiKey: process.env.PERPLEXITY_API_KEY, // if not already set
-  timeout: 600000, // 10 minutes in ms; tweak lower/higher as you like
-  maxRetries: 3,
-});
+
+// Perplexity client will be initialized per-request with organization-specific API key
+// See getPerplexityClient function below
+
+// Helper: Get Perplexity client with organization-specific API key
+async function getPerplexityClient(organizationId) {
+  const apiKey = await getOrganizationApiKey(organizationId, "perplexity");
+  if (!apiKey) {
+    throw new Error(
+      "Perplexity API key not configured. Please set it in API Settings."
+    );
+  }
+  return new Perplexity({
+    apiKey: apiKey,
+    timeout: 600000, // 10 minutes
+    maxRetries: 3,
+  });
+}
 
 // Helper: normalize analysis object (clean weird summary formatting, code fences, nested JSON, etc.)
 function normalizeAnalysisObject(analysis) {
@@ -52,9 +76,20 @@ function normalizeAnalysisObject(analysis) {
 }
 
 // Helper: generate a detailed sector analysis using Perplexity based on the existing pitch deck analysis
-async function generateSectorAnalysisForPitchDeck(pdRecord, baseAnalysis) {
+async function generateSectorAnalysisForPitchDeck(
+  pdRecord,
+  baseAnalysis,
+  model = "sonar-pro"
+) {
   try {
     if (!pdRecord || !baseAnalysis) return null;
+
+    // Validate model selection
+    const validModels = ["sonar-pro", "deep-research"];
+    const selectedModel = validModels.includes(model) ? model : "sonar-pro";
+
+    // Get Perplexity client with organization-specific API key
+    const perplexity = await getPerplexityClient(pdRecord.organization);
 
     const summary = baseAnalysis.summary || "";
     const keyPoints = Array.isArray(baseAnalysis.keyPoints)
@@ -116,7 +151,7 @@ CRITICAL RULES:
 - Output **valid JSON only**. No markdown, no backticks, no commentary.`;
 
     const completion = await perplexity.chat.completions.create({
-      model: "sonar-pro",
+      model: selectedModel,
       messages: [
         {
           role: "user",
@@ -156,10 +191,15 @@ router.post(
         return res.status(400).json({ message: "No file uploaded" });
       }
 
-      const { title, description } = req.body;
+      const { title, description, model } = req.body;
       if (!title) {
         return res.status(400).json({ message: "Title is required" });
       }
+
+      // Validate and set model (default to sonar-pro)
+      const validModels = ["sonar-pro", "deep-research"];
+      const selectedModel =
+        model && validModels.includes(model) ? model : "sonar-pro";
 
       // Convert file to base64 for analysis
       const encodedFile = req.file.buffer.toString("base64");
@@ -178,9 +218,21 @@ router.post(
           fileType: req.file.mimetype,
           uploadDate: new Date(),
         },
+        analysis: {
+          aiModel: selectedModel,
+        },
       });
 
       await pitchDeck.save();
+
+      // Log audit trail
+      await logPitchDeckUpload(
+        pitchDeck._id,
+        req.user._id,
+        req.user.organization._id,
+        title,
+        req
+      );
 
       // Fire-and-forget background AI analysis (with base64 file)
       const pitchDeckId = pitchDeck._id;
@@ -192,7 +244,8 @@ router.post(
           pitchDeckId,
           encodedFile,
           fileName,
-          fileForUpload
+          fileForUpload,
+          selectedModel
         ).catch((err) => {
           console.error(
             `Background pitch deck analysis failed for ${pitchDeckId}:`,
@@ -225,9 +278,18 @@ async function analyzePitchDeckWithBase64(
   pitchDeckId,
   encodedFile,
   fileName,
-  fileBuffer
+  fileBuffer,
+  model = "sonar-pro" // Default to sonar-pro, allow deep-research for higher quality
 ) {
   try {
+    // Validate model selection
+    const validModels = ["sonar-pro", "deep-research"];
+    const selectedModel = validModels.includes(model) ? model : "sonar-pro";
+
+    console.log(
+      `[PITCH-DECK-BG] Starting analysis for pitch deck ${pitchDeckId} using model: ${selectedModel}`
+    );
+
     // Update status to analyzing
     await PitchDeck.findByIdAndUpdate(pitchDeckId, { status: "ANALYZING" });
 
@@ -242,6 +304,9 @@ async function analyzePitchDeckWithBase64(
       .sort({ updatedAt: -1 })
       .lean();
 
+    // Get Perplexity client with organization-specific API key
+    const perplexity = await getPerplexityClient(pdRecord.organization);
+
     // Generate AI analysis using Perplexity with retries
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     async function callPerplexityWithRetry(maxAttempts = 3) {
@@ -249,7 +314,7 @@ async function analyzePitchDeckWithBase64(
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
           return await perplexity.chat.completions.create({
-            model: "sonar-pro",
+            model: selectedModel,
             messages: [
               {
                 role: "user",
@@ -421,10 +486,11 @@ ${
     // Normalize analysis (fix weird summary formatting, nested JSON, code fences, etc.)
     analysis = normalizeAnalysisObject(analysis);
 
-    // Generate separate, detailed sector analysis using web search
+    // Generate separate, detailed sector analysis using web search (use same model)
     const sectorAnalysis = await generateSectorAnalysisForPitchDeck(
       pdRecord,
-      analysis
+      analysis,
+      selectedModel
     );
     if (sectorAnalysis) {
       analysis.sectorAnalysis = sectorAnalysis;
@@ -448,7 +514,7 @@ ${
       analysis: {
         ...analysis,
         analysisDate: new Date(),
-        aiModel: "sonar-pro",
+        aiModel: selectedModel,
       },
       analysisRaw: analysisText,
       analysisDate: new Date(),
@@ -463,7 +529,7 @@ ${
           analysis: {
             ...analysis,
             analysisDate: new Date(),
-            aiModel: "sonar-pro",
+            aiModel: selectedModel,
           },
           analysisRaw: analysisText,
           analysisVersion: 1,
@@ -593,9 +659,13 @@ router.get(
             ? pitchDeck.analysis.toObject()
             : pitchDeck.analysis
         );
+        // Use existing model or allow override via query parameter
+        const model =
+          req.query.model || pitchDeck.analysis.aiModel || "sonar-pro";
         const newSector = await generateSectorAnalysisForPitchDeck(
           pitchDeck,
-          baseAnalysis
+          baseAnalysis,
+          model
         );
         if (newSector) {
           sectorAnalysis = newSector;
@@ -766,6 +836,16 @@ router.post(
       await comment.save();
       await comment.populate("author", "firstName lastName email");
 
+      // Log audit trail
+      await logCommentAdded(
+        comment._id,
+        pitchDeck._id,
+        req.user._id,
+        req.user.organization._id,
+        content,
+        req
+      );
+
       res.status(201).json({
         message: "Comment added successfully",
         comment,
@@ -841,12 +921,411 @@ router.delete("/:id", authMiddleware, requireSAOrAnalyst, async (req, res) => {
     // Soft delete all comments
     await Comment.updateMany({ pitchDeck: pitchDeck._id }, { isActive: false });
 
+    // Log audit trail
+    await logPitchDeckDeleted(
+      pitchDeck._id,
+      req.user._id,
+      req.user.organization._id,
+      pitchDeck.title,
+      req
+    );
+
     res.json({ message: "Pitch deck deleted successfully" });
   } catch (error) {
     console.error("Delete pitch deck error:", error);
     res.status(500).json({ message: "Server error" });
   }
 });
+
+// ====================================================================================
+// DATA ROOM ENDPOINTS
+// ====================================================================================
+
+// Configure multer for data room documents (accepts more file types)
+const dataRoomUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept PDF, Word, Excel, PowerPoint, images, and text files
+    const allowedTypes = [
+      "application/pdf",
+      "application/vnd.ms-powerpoint",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "text/plain",
+      "text/csv",
+      "image/png",
+      "image/jpeg",
+      "image/jpg",
+    ];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error(
+          "Invalid file type. Allowed types: PDF, Word, Excel, PowerPoint, images, and text files."
+        ),
+        false
+      );
+    }
+  },
+});
+
+// Upload document to data room
+router.post(
+  "/:id/data-room/upload",
+  authMiddleware,
+  requireSAOrAnalyst,
+  dataRoomUpload.single("document"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: "No file uploaded" });
+      }
+
+      const query = {
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query);
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      // Upload file to S3
+      const fileKey = generateFileKey(
+        req.file.originalname,
+        req.user.organization._id,
+        "data-room"
+      );
+      const fileUrl = await uploadToS3(
+        req.file.buffer,
+        fileKey,
+        req.file.mimetype
+      );
+
+      // Create data room document record
+      const dataRoomDoc = new DataRoomDocument({
+        pitchDeck: pitchDeck._id,
+        title: req.body.title || req.file.originalname,
+        description: req.body.description || "",
+        fileUrl: fileUrl,
+        fileKey: fileKey,
+        uploadedBy: req.user._id,
+        organization: req.user.organization._id,
+        metadata: {
+          fileSize: req.file.size,
+          fileType: req.file.mimetype,
+          uploadDate: new Date(),
+        },
+      });
+
+      await dataRoomDoc.save();
+
+      // Log audit trail
+      await logDataRoomDocumentUploaded(
+        dataRoomDoc._id,
+        pitchDeck._id,
+        req.user._id,
+        req.user.organization._id,
+        dataRoomDoc.title,
+        req
+      );
+
+      // Generate AI summary in background
+      setImmediate(async () => {
+        try {
+          const summaryResult = await generateDocumentSummary(
+            req.file.buffer,
+            req.file.originalname,
+            req.file.mimetype,
+            req.user.organization._id
+          );
+
+          await DataRoomDocument.findByIdAndUpdate(dataRoomDoc._id, {
+            aiSummary: summaryResult.summary,
+            category: summaryResult.category,
+            "metadata.summaryGeneratedAt": new Date(),
+            "metadata.aiModel": "gpt-4o-mini",
+          });
+
+          console.log(
+            `[DATA-ROOM] Generated summary for document ${dataRoomDoc._id}: ${summaryResult.summary}`
+          );
+        } catch (error) {
+          console.error(
+            `[DATA-ROOM] Error generating summary for document ${dataRoomDoc._id}:`,
+            error
+          );
+        }
+      });
+
+      res.status(201).json({
+        message:
+          "Document uploaded successfully. AI summary is being generated.",
+        document: {
+          id: dataRoomDoc._id,
+          title: dataRoomDoc.title,
+          description: dataRoomDoc.description,
+          fileUrl: fileUrl,
+          aiSummary: null,
+          summaryPending: true,
+          uploadedAt: dataRoomDoc.createdAt,
+        },
+      });
+    } catch (error) {
+      console.error("Data room upload error:", error);
+      res.status(500).json({ message: "Server error during upload" });
+    }
+  }
+);
+
+// Get all data room documents for a pitch deck
+router.get(
+  "/:id/data-room",
+  authMiddleware,
+  requireSAOrAnalyst,
+  async (req, res) => {
+    try {
+      const query = {
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query);
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      const documents = await DataRoomDocument.find({
+        pitchDeck: pitchDeck._id,
+        isActive: true,
+      })
+        .populate("uploadedBy", "firstName lastName email")
+        .sort({ createdAt: -1 });
+
+      // Generate signed URLs for documents
+      const documentsWithSignedUrls = await Promise.all(
+        documents.map(async (doc) => {
+          let signedUrl = doc.fileUrl;
+          if (doc.fileKey) {
+            signedUrl = await generateSignedUrl(doc.fileKey);
+          }
+          return {
+            id: doc._id,
+            title: doc.title,
+            description: doc.description,
+            aiSummary: doc.aiSummary,
+            category: doc.category,
+            fileUrl: signedUrl,
+            uploadedBy: doc.uploadedBy,
+            createdAt: doc.createdAt,
+            updatedAt: doc.updatedAt,
+            metadata: doc.metadata,
+          };
+        })
+      );
+
+      res.json({
+        pitchDeckId: pitchDeck._id.toString(),
+        documents: documentsWithSignedUrls,
+        count: documentsWithSignedUrls.length,
+      });
+    } catch (error) {
+      console.error("Get data room documents error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+// Get specific data room document
+router.get(
+  "/:id/data-room/:docId",
+  authMiddleware,
+  requireSAOrAnalyst,
+  async (req, res) => {
+    try {
+      const query = {
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query);
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      const document = await DataRoomDocument.findOne({
+        _id: req.params.docId,
+        pitchDeck: pitchDeck._id,
+        isActive: true,
+      }).populate("uploadedBy", "firstName lastName email");
+
+      if (!document) {
+        return res.status(404).json({ message: "Document not found" });
+      }
+
+      // Generate signed URL
+      let signedUrl = document.fileUrl;
+      if (document.fileKey) {
+        signedUrl = await generateSignedUrl(document.fileKey);
+      }
+
+      res.json({
+        document: {
+          id: document._id,
+          title: document.title,
+          description: document.description,
+          aiSummary: document.aiSummary,
+          category: document.category,
+          fileUrl: signedUrl,
+          uploadedBy: document.uploadedBy,
+          createdAt: document.createdAt,
+          updatedAt: document.updatedAt,
+          metadata: document.metadata,
+        },
+      });
+    } catch (error) {
+      console.error("Get data room document error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+// Regenerate AI summary for a document
+router.patch(
+  "/:id/data-room/:docId/regenerate-summary",
+  authMiddleware,
+  requireSAOrAnalyst,
+  async (req, res) => {
+    try {
+      const query = {
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query);
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      const document = await DataRoomDocument.findOne({
+        _id: req.params.docId,
+        pitchDeck: pitchDeck._id,
+        isActive: true,
+      });
+
+      if (!document) {
+        return res.status(404).json({ message: "Document not found" });
+      }
+
+      // Download file from S3 for summary generation
+      const { downloadFromS3 } = require("../utils/s3Upload");
+      const fileBuffer = await downloadFromS3(document.fileKey);
+
+      // Generate new summary
+      const summaryResult = await generateDocumentSummary(
+        fileBuffer,
+        document.title,
+        document.metadata.fileType,
+        req.user.organization._id
+      );
+
+      // Update document with new summary
+      document.aiSummary = summaryResult.summary;
+      document.category = summaryResult.category;
+      document.metadata.summaryGeneratedAt = new Date();
+      document.metadata.aiModel = "gpt-4o-mini";
+      await document.save();
+
+      res.json({
+        message: "Summary regenerated successfully",
+        document: {
+          id: document._id,
+          aiSummary: document.aiSummary,
+          category: document.category,
+        },
+      });
+    } catch (error) {
+      console.error("Regenerate summary error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+// Delete data room document
+router.delete(
+  "/:id/data-room/:docId",
+  authMiddleware,
+  requireSAOrAnalyst,
+  async (req, res) => {
+    try {
+      const query = {
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query);
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      const document = await DataRoomDocument.findOne({
+        _id: req.params.docId,
+        pitchDeck: pitchDeck._id,
+        isActive: true,
+      });
+
+      if (!document) {
+        return res.status(404).json({ message: "Document not found" });
+      }
+
+      // Soft delete
+      document.isActive = false;
+      await document.save();
+
+      // Optionally delete from S3 (uncomment if needed)
+      // const { deleteFromS3 } = require("../utils/s3Upload");
+      // await deleteFromS3(document.fileKey);
+
+      res.json({ message: "Document deleted successfully" });
+    } catch (error) {
+      console.error("Delete data room document error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
 
 // ====================================================================================
 // CONVERSATIONAL ANALYSIS ENDPOINTS
@@ -890,9 +1369,31 @@ router.get(
         .populate("uploadedBy", "firstName lastName email")
         .sort({ createdAt: -1 });
 
+      // Get data room documents
+      const dataRoomDocs = await DataRoomDocument.find({
+        pitchDeck: pitchDeck._id,
+        isActive: true,
+      })
+        .populate("uploadedBy", "firstName lastName email")
+        .sort({ createdAt: -1 });
+
       // Generate signed URLs for supporting documents
       const supportingDocsWithSignedUrls = await Promise.all(
         supportingDocs.map(async (doc) => {
+          let signedUrl = doc.fileUrl;
+          if (doc.fileKey) {
+            signedUrl = await generateSignedUrl(doc.fileKey);
+          }
+          return {
+            ...doc.toObject(),
+            fileUrl: signedUrl,
+          };
+        })
+      );
+
+      // Generate signed URLs for data room documents
+      const dataRoomDocsWithSignedUrls = await Promise.all(
+        dataRoomDocs.map(async (doc) => {
           let signedUrl = doc.fileUrl;
           if (doc.fileKey) {
             signedUrl = await generateSignedUrl(doc.fileKey);
@@ -939,6 +1440,7 @@ router.get(
       res.json({
         conversationHistory: formattedMessages,
         supportingDocuments: supportingDocsWithSignedUrls,
+        dataRoomDocuments: dataRoomDocsWithSignedUrls,
         currentVersion: pitchDeck.analysisVersion,
         status: pitchDeck.status,
       });
@@ -1035,13 +1537,21 @@ router.post(
         isActive: true,
       });
 
-      // 3. Process with AI to get response
+      const allDataRoomDocs = await DataRoomDocument.find({
+        pitchDeck: pitchDeck._id,
+        isActive: true,
+      });
+
+      // 3. Process with AI to get response (check for model parameter)
+      const model = req.body.model; // Optional model selection
       const result = await reanalyzeWithContext(
         pitchDeck._id,
         allMessages,
         allSupportingDocs,
+        allDataRoomDocs,
         savedAttachments,
-        message || "[Attached files]"
+        message || "[Attached files]",
+        model
       );
 
       // 4. Save ONE document with both query and response
@@ -1070,6 +1580,17 @@ router.post(
       });
 
       await conversationTurn.populate("author", "firstName lastName email");
+
+      // Log audit trail for chat message
+      if (message) {
+        await logChatMessage(
+          pitchDeck._id,
+          req.user._id,
+          req.user.organization._id,
+          message,
+          req
+        );
+      }
 
       // 5. Build response
       const response = {
@@ -1205,8 +1726,10 @@ async function reanalyzeWithContext(
   pitchDeckId,
   allMessages,
   allSupportingDocs,
+  allDataRoomDocs = [],
   newAttachments = [],
-  currentUserMessage = ""
+  currentUserMessage = "",
+  model = null // Optional model override, defaults to existing model or sonar-pro
 ) {
   try {
     const pitchDeck = await PitchDeck.findById(pitchDeckId).lean();
@@ -1223,6 +1746,13 @@ async function reanalyzeWithContext(
     // Get the current analysis for reference
     const currentAnalysis = pitchDeck.analysis || {};
     const currentAnalysisJson = JSON.stringify(currentAnalysis, null, 2);
+
+    // Determine which model to use
+    const validModels = ["sonar-pro", "deep-research"];
+    const selectedModel =
+      model && validModels.includes(model)
+        ? model
+        : currentAnalysis.aiModel || "sonar-pro";
 
     // Build conversation context from messages (now with userQuery/aiResponse structure)
     const conversationContext = allMessages
@@ -1261,6 +1791,19 @@ async function reanalyzeWithContext(
             .join("\n")}`
         : "";
 
+    // Build data room documents context with AI summaries
+    const dataRoomDocsContext =
+      allDataRoomDocs.length > 0
+        ? `\n\nData Room Documents Shared:\n${allDataRoomDocs
+            .map(
+              (doc) =>
+                `- ${doc.title}${doc.category ? ` (${doc.category})` : ""}: ${
+                  doc.aiSummary || doc.description || "No summary available"
+                }`
+            )
+            .join("\n")}`
+        : "";
+
     // Determine if this requires full re-analysis or just a conversational answer
     const hasAttachments = newAttachments.length > 0;
     const userMessageContent = currentUserMessage;
@@ -1292,6 +1835,7 @@ ${currentAnalysisJson}
 CONVERSATION HISTORY:
 ${conversationContext}
 ${supportingDocsContext}
+${dataRoomDocsContext}
 
 NEW INFORMATION:
 ${userMessageContent || "No new message provided"}
@@ -1371,6 +1915,9 @@ ${
         });
       }
 
+      // Get Perplexity client with organization-specific API key
+      const perplexity = await getPerplexityClient(pitchDeck.organization);
+
       // Generate AI analysis using Perplexity with retries (similar to analyzePitchDeckWithBase64)
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       async function callPerplexityWithRetry(maxAttempts = 3) {
@@ -1378,7 +1925,7 @@ ${
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           try {
             return await perplexity.chat.completions.create({
-              model: "sonar-pro",
+              model: selectedModel,
               messages: [
                 {
                   role: "user",
@@ -1418,6 +1965,7 @@ ${currentAnalysisJson}
 CONVERSATION HISTORY:
 ${conversationContext}
 ${supportingDocsContext}
+${dataRoomDocsContext}
 
 IMPORTANT - Response Type Instructions:
 You must first determine the appropriate response type:
@@ -1425,8 +1973,9 @@ You must first determine the appropriate response type:
 1. **CONVERSATIONAL** - Use when:
    - Analyst asks a specific question about existing analysis
    - Analyst wants clarification or elaboration
+   - Analyst asks about shared documents (e.g., "What documents have been shared?", "What's in the data room?")
    - No new data/files are provided
-   - Examples: "What's the CAC?", "Can you elaborate on the team?", "What are the risks?"
+   - Examples: "What's the CAC?", "Can you elaborate on the team?", "What are the risks?", "What documents has the user shared with me?"
 
 2. **MINOR_EDIT** - Use when:
    - Analyst requests minor corrections (spelling, typos, small factual updates)
@@ -1463,6 +2012,7 @@ Rules:
 • For "conversational", give direct answers - don't repeat the entire analysis
 • For "minor_edit", provide specific edits with exact paths and values - only edit what was requested
 • Be objective, evidence-based, and avoid speculation
+• If the analyst asks about shared documents (e.g., "What documents have been shared?", "What's in the data room?", "List all documents"), provide a comprehensive list of all data room documents with their AI-generated summaries
 • If uncertain, choose "conversational" and offer to do full re-analysis if needed
 
 Current analyst message: "${userMessageContent}"`;
@@ -1486,9 +2036,12 @@ Current analyst message: "${userMessageContent}"`;
         });
       }
 
+      // Get Perplexity client with organization-specific API key
+      const perplexity = await getPerplexityClient(pitchDeck.organization);
+
       // Call Perplexity with updated context
       completion = await perplexity.chat.completions.create({
-        model: "sonar-pro",
+        model: selectedModel,
         messages: [
           {
             role: "user",
@@ -1633,7 +2186,7 @@ Current analyst message: "${userMessageContent}"`;
         analysis: {
           ...fullAnalysis,
           analysisDate: new Date(),
-          aiModel: "sonar-pro",
+          aiModel: selectedModel,
         },
         analysisRaw: analysisText,
         analysisDate: new Date(),
@@ -1648,7 +2201,7 @@ Current analyst message: "${userMessageContent}"`;
             analysis: {
               ...fullAnalysis,
               analysisDate: new Date(),
-              aiModel: "sonar-pro",
+              aiModel: selectedModel,
             },
             analysisRaw: analysisText,
             analysisVersion: actualVersion,

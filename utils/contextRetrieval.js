@@ -2,6 +2,7 @@ const PitchDeck = require("../models/PitchDeck");
 const Thesis = require("../models/Thesis");
 const PitchDeckMessage = require("../models/PitchDeckMessage");
 const SupportingDocument = require("../models/SupportingDocument");
+const DataRoomDocument = require("../models/DataRoomDocument");
 
 /**
  * Retrieve complete knowledge base context for a pitch deck
@@ -45,6 +46,15 @@ async function getPitchDeckContext(pitchDeckId) {
       .sort({ createdAt: -1 })
       .lean();
 
+    // Fetch data room documents
+    const dataRoomDocs = await DataRoomDocument.find({
+      pitchDeck: pitchDeckId,
+      isActive: true,
+    })
+      .populate("uploadedBy", "firstName lastName email")
+      .sort({ createdAt: -1 })
+      .lean();
+
     // Build conversation history text
     const conversationHistory = messages
       .map((msg) => {
@@ -80,6 +90,17 @@ async function getPitchDeckContext(pitchDeckId) {
             .join("\n")
         : "";
 
+    // Build data room documents context with AI summaries
+    const dataRoomDocsContext =
+      dataRoomDocs.length > 0
+        ? dataRoomDocs
+            .map(
+              (doc) =>
+                `- ${doc.title}${doc.category ? ` (${doc.category})` : ""}: ${doc.aiSummary || doc.description || "No summary available"}`
+            )
+            .join("\n")
+        : "";
+
     return {
       pitchDeck: {
         id: pitchDeck._id.toString(),
@@ -99,8 +120,17 @@ async function getPitchDeckContext(pitchDeckId) {
         : null,
       conversationHistory: conversationHistory || "",
       supportingDocuments: supportingDocsContext || "",
+      dataRoomDocuments: dataRoomDocsContext || "",
       messageCount: messages.length,
       supportingDocCount: supportingDocs.length,
+      dataRoomDocCount: dataRoomDocs.length,
+      dataRoomDocumentsList: dataRoomDocs.map((doc) => ({
+        id: doc._id.toString(),
+        title: doc.title,
+        category: doc.category,
+        aiSummary: doc.aiSummary,
+        description: doc.description,
+      })),
     };
   } catch (error) {
     console.error("Error retrieving pitch deck context:", error);
@@ -147,6 +177,13 @@ async function getFormattedContext(pitchDeckId) {
   if (context.supportingDocuments) {
     formatted += `SUPPORTING DOCUMENTS:\n`;
     formatted += context.supportingDocuments;
+    formatted += `\n\n`;
+  }
+
+  if (context.dataRoomDocuments) {
+    formatted += `DATA ROOM DOCUMENTS:\n`;
+    formatted += `The following documents have been shared in the data room:\n`;
+    formatted += context.dataRoomDocuments;
     formatted += `\n\n`;
   }
 

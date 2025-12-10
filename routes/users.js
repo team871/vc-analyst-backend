@@ -2,6 +2,7 @@ const express = require("express");
 const { body, validationResult } = require("express-validator");
 const User = require("../models/User");
 const { authMiddleware, requireSA } = require("../middleware/auth");
+const { logAnalystCreated, logAnalystDeactivated } = require("../utils/auditLogger");
 
 const router = express.Router();
 
@@ -61,6 +62,15 @@ router.post(
       });
       await user.save();
 
+      // Log audit trail
+      await logAnalystCreated(
+        user._id,
+        req.user._id,
+        req.user.organization._id,
+        `${user.firstName} ${user.lastName}`,
+        req
+      );
+
       res.status(201).json({
         message: "Analyst created successfully",
         user: {
@@ -113,6 +123,15 @@ router.patch(
 
       analyst.isActive = false;
       await analyst.save();
+
+      // Log audit trail
+      await logAnalystDeactivated(
+        analyst._id,
+        req.user._id,
+        req.user.organization._id,
+        `${analyst.firstName} ${analyst.lastName}`,
+        req
+      );
 
       res.json({ message: "Analyst deactivated successfully" });
     } catch (error) {

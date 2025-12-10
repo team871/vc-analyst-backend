@@ -12,6 +12,8 @@ const thesisRoutes = require("./routes/thesis.js");
 const pitchDeckRoutes = require("./routes/pitchDeck");
 const userRoutes = require("./routes/users.js");
 const liveConversationRoutes = require("./routes/liveConversation").router;
+const auditTrailRoutes = require("./routes/auditTrail");
+const apiSettingsRoutes = require("./routes/apiSettings");
 const { websocketAuth } = require("./middleware/websocketAuth");
 
 const app = express();
@@ -72,6 +74,8 @@ app.use("/api/thesis", thesisRoutes);
 app.use("/api/pitch-decks", pitchDeckRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/live-conversations", liveConversationRoutes);
+app.use("/api/audit-trail", auditTrailRoutes);
+app.use("/api/api-settings", apiSettingsRoutes);
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
