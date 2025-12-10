@@ -145,76 +145,55 @@ Test the health endpoint:
 curl http://localhost:5000/api/health
 ```
 
-## Step 8: Configure Reverse Proxy (Optional but Recommended)
+## Step 8: Configure Nginx + SSL (Recommended for Production)
 
-For production, set up Nginx as a reverse proxy:
+For production, set up Nginx as a reverse proxy with SSL certificate.
 
-### Install Nginx
+### Quick Setup (Automated)
 
-```bash
-sudo yum install -y nginx
-sudo systemctl enable nginx
-sudo systemctl start nginx
-```
-
-### Configure Nginx
-
-Create `/etc/nginx/conf.d/vc-analyst.conf`:
-
-```nginx
-upstream vc_analyst {
-    server localhost:5000;
-}
-
-server {
-    listen 80;
-    server_name your-domain.com;
-
-    # WebSocket support
-    location /socket.io/ {
-        proxy_pass http://vc_analyst;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # API endpoints
-    location /api/ {
-        proxy_pass http://vc_analyst;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # Health check
-    location /api/health {
-        proxy_pass http://vc_analyst;
-        access_log off;
-    }
-}
-```
-
-Reload Nginx:
+**Prerequisites:**
+- Domain name pointing to your EC2 instance IP
+- DNS A record configured
 
 ```bash
-sudo nginx -t
-sudo systemctl reload nginx
+# Run the automated setup script
+cd /opt/vc-analyst-backend
+chmod +x scripts/setup-nginx-ssl.sh
+sudo ./scripts/setup-nginx-ssl.sh
+
+# Or with domain and email as arguments
+sudo ./scripts/setup-nginx-ssl.sh api.yourdomain.com your-email@example.com
 ```
 
-## Step 9: Set Up SSL Certificate (Optional but Recommended)
+The script will:
+- Install Nginx and Certbot
+- Create Nginx configuration
+- Obtain SSL certificate from Let's Encrypt
+- Set up auto-renewal
+- Configure HTTP to HTTPS redirect
 
-Use Let's Encrypt with Certbot:
+### Manual Setup
 
-```bash
-sudo yum install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d your-domain.com
-```
+See `scripts/NGINX_SSL_SETUP.md` for detailed manual setup instructions.
+
+### After Setup
+
+1. **Update your `.env` file** to include your domain:
+   ```env
+   ALLOWED_ORIGINS=https://api.yourdomain.com,https://yourdomain.com
+   ```
+
+2. **Restart your backend**:
+   ```bash
+   sudo systemctl restart vc-analyst
+   ```
+
+3. **Test your API**:
+   ```bash
+   curl https://api.yourdomain.com/api/health
+   ```
+
+For troubleshooting and detailed configuration, see `scripts/NGINX_SSL_SETUP.md`.
 
 ## Service Management
 
