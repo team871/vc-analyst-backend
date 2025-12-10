@@ -26,6 +26,7 @@ const {
   logChatMessage,
   logPitchDeckDeleted,
 } = require("../utils/auditLogger");
+const { getOrganizationApiKey } = require("../utils/organizationApiKeys");
 
 const router = express.Router();
 
@@ -494,6 +495,26 @@ ${
     );
     if (sectorAnalysis) {
       analysis.sectorAnalysis = sectorAnalysis;
+
+      // Store initial sector analysis in history
+      const sectorAnalysisRaw = JSON.stringify(sectorAnalysis, null, 2);
+      const sectorHistoryRecord = {
+        version: 1,
+        sectorAnalysis: sectorAnalysis,
+        analysisRaw: sectorAnalysisRaw,
+        analysisDate: new Date(),
+        aiModel: selectedModel,
+        createdBy: pdRecord.uploadedBy,
+      };
+
+      await PitchDeck.findByIdAndUpdate(pitchDeckId, {
+        $set: {
+          sectorAnalysisVersion: 1,
+        },
+        $push: {
+          sectorAnalysisHistory: sectorHistoryRecord,
+        },
+      });
     }
 
     const endTime = Date.now();
@@ -621,7 +642,122 @@ router.get("/", authMiddleware, requireSAOrAnalyst, async (req, res) => {
   }
 });
 
-// Get sector analysis for a specific pitch deck (optionally recompute with ?refresh=true)
+// Generate new sector analysis for a pitch deck with model selection
+router.post(
+  "/:id/sector-analysis",
+  authMiddleware,
+  requireSAOrAnalyst,
+  [
+    body("model")
+      .optional()
+      .isIn(["sonar-pro", "deep-research"])
+      .withMessage("Model must be either 'sonar-pro' or 'deep-research'"),
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+
+      const query = {
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      // Analysts can only see their own pitch decks
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query);
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      if (!pitchDeck.analysis) {
+        return res.status(400).json({
+          message:
+            "Pitch deck analysis not available. Please run initial analysis first.",
+        });
+      }
+
+      // Validate and set model (default to sonar-pro)
+      const validModels = ["sonar-pro", "deep-research"];
+      const selectedModel =
+        req.body.model && validModels.includes(req.body.model)
+          ? req.body.model
+          : "sonar-pro";
+
+      const baseAnalysis = normalizeAnalysisObject(
+        pitchDeck.analysis.toObject
+          ? pitchDeck.analysis.toObject()
+          : pitchDeck.analysis
+      );
+
+      // Generate new sector analysis
+      const startTime = Date.now();
+      const newSectorAnalysis = await generateSectorAnalysisForPitchDeck(
+        pitchDeck,
+        baseAnalysis,
+        selectedModel
+      );
+
+      if (!newSectorAnalysis) {
+        return res.status(500).json({
+          message: "Failed to generate sector analysis. Please try again.",
+        });
+      }
+
+      const endTime = Date.now();
+      const analysisDuration = endTime - startTime;
+
+      // Increment version
+      const newVersion = (pitchDeck.sectorAnalysisVersion || 0) + 1;
+
+      // Get raw response (we'll need to modify generateSectorAnalysisForPitchDeck to return it)
+      // For now, we'll store the parsed analysis
+      const sectorAnalysisRaw = JSON.stringify(newSectorAnalysis, null, 2);
+
+      // Create history record
+      const historyRecord = {
+        version: newVersion,
+        sectorAnalysis: newSectorAnalysis,
+        analysisRaw: sectorAnalysisRaw,
+        analysisDate: new Date(),
+        aiModel: selectedModel,
+        createdBy: req.user._id,
+      };
+
+      // Update pitch deck with new sector analysis and add to history
+      await PitchDeck.findByIdAndUpdate(pitchDeck._id, {
+        $set: {
+          "analysis.sectorAnalysis": newSectorAnalysis,
+          sectorAnalysisVersion: newVersion,
+        },
+        $push: {
+          sectorAnalysisHistory: historyRecord,
+        },
+      });
+
+      res.status(201).json({
+        message: "Sector analysis generated successfully",
+        pitchDeckId: pitchDeck._id.toString(),
+        sectorAnalysis: newSectorAnalysis,
+        version: newVersion,
+        aiModel: selectedModel,
+        analysisDate: new Date(),
+        processingTime: analysisDuration,
+      });
+    } catch (error) {
+      console.error("Generate sector analysis error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+// Get sector analysis for a specific pitch deck (optionally with version)
 router.get(
   "/:id/sector-analysis",
   authMiddleware,
@@ -644,52 +780,122 @@ router.get(
         return res.status(404).json({ message: "Pitch deck not found" });
       }
 
-      let sectorAnalysis =
-        pitchDeck.analysis && pitchDeck.analysis.sectorAnalysis
-          ? pitchDeck.analysis.sectorAnalysis
-          : null;
+      // Check if specific version requested
+      const requestedVersion = req.query.version
+        ? parseInt(req.query.version, 10)
+        : null;
 
-      const shouldRefresh =
-        req.query.refresh && String(req.query.refresh).toLowerCase() === "true";
+      let sectorAnalysis = null;
+      let version = null;
+      let aiModel = null;
+      let analysisDate = null;
 
-      // If missing or refresh requested and we have a base analysis, recompute
-      if ((!sectorAnalysis || shouldRefresh) && pitchDeck.analysis) {
-        const baseAnalysis = normalizeAnalysisObject(
-          pitchDeck.analysis.toObject
-            ? pitchDeck.analysis.toObject()
-            : pitchDeck.analysis
+      if (requestedVersion) {
+        // Get specific version from history
+        const historyEntry = pitchDeck.sectorAnalysisHistory?.find(
+          (entry) => entry.version === requestedVersion
         );
-        // Use existing model or allow override via query parameter
-        const model =
-          req.query.model || pitchDeck.analysis.aiModel || "sonar-pro";
-        const newSector = await generateSectorAnalysisForPitchDeck(
-          pitchDeck,
-          baseAnalysis,
-          model
-        );
-        if (newSector) {
-          sectorAnalysis = newSector;
-          await PitchDeck.findByIdAndUpdate(pitchDeck._id, {
-            $set: {
-              "analysis.sectorAnalysis": sectorAnalysis,
-            },
+        if (historyEntry) {
+          sectorAnalysis = historyEntry.sectorAnalysis;
+          version = historyEntry.version;
+          aiModel = historyEntry.aiModel;
+          analysisDate = historyEntry.analysisDate;
+        } else {
+          return res.status(404).json({
+            message: `Sector analysis version ${requestedVersion} not found`,
           });
         }
+      } else {
+        // Get current/latest sector analysis
+        sectorAnalysis =
+          pitchDeck.analysis && pitchDeck.analysis.sectorAnalysis
+            ? pitchDeck.analysis.sectorAnalysis
+            : null;
+        version = pitchDeck.sectorAnalysisVersion || 0;
+        aiModel =
+          pitchDeck.analysis?.aiModel ||
+          pitchDeck.sectorAnalysisHistory?.[
+            pitchDeck.sectorAnalysisHistory.length - 1
+          ]?.aiModel ||
+          null;
+        analysisDate =
+          pitchDeck.sectorAnalysisHistory?.[
+            pitchDeck.sectorAnalysisHistory.length - 1
+          ]?.analysisDate || null;
       }
 
       if (!sectorAnalysis) {
         return res.status(404).json({
           message:
-            "Sector analysis not available yet. Run initial analysis first or try again later.",
+            "Sector analysis not available yet. Please generate sector analysis first.",
         });
       }
 
       res.json({
         pitchDeckId: pitchDeck._id.toString(),
         sectorAnalysis,
+        version,
+        aiModel,
+        analysisDate,
       });
     } catch (error) {
       console.error("Get sector analysis error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+// Get all sector analysis versions/history for a pitch deck
+router.get(
+  "/:id/sector-analysis/versions",
+  authMiddleware,
+  requireSAOrAnalyst,
+  async (req, res) => {
+    try {
+      const query = {
+        _id: req.params.id,
+        organization: req.user.organization._id,
+        isActive: true,
+      };
+
+      // Analysts can only see their own pitch decks
+      if (req.user.role === "ANALYST") {
+        query.uploadedBy = req.user._id;
+      }
+
+      const pitchDeck = await PitchDeck.findOne(query)
+        .populate("sectorAnalysisHistory.createdBy", "firstName lastName email")
+        .select("sectorAnalysisHistory sectorAnalysisVersion");
+
+      if (!pitchDeck) {
+        return res.status(404).json({ message: "Pitch deck not found" });
+      }
+
+      const versions = (pitchDeck.sectorAnalysisHistory || []).map((entry) => ({
+        version: entry.version,
+        analysisDate: entry.analysisDate,
+        aiModel: entry.aiModel,
+        createdBy: entry.createdBy
+          ? {
+              id: entry.createdBy._id,
+              firstName: entry.createdBy.firstName,
+              lastName: entry.createdBy.lastName,
+              email: entry.createdBy.email,
+            }
+          : null,
+      }));
+
+      // Sort by version descending (newest first)
+      versions.sort((a, b) => b.version - a.version);
+
+      res.json({
+        pitchDeckId: pitchDeck._id.toString(),
+        currentVersion: pitchDeck.sectorAnalysisVersion || 0,
+        versions,
+        count: versions.length,
+      });
+    } catch (error) {
+      console.error("Get sector analysis versions error:", error);
       res.status(500).json({ message: "Server error" });
     }
   }

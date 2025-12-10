@@ -72,6 +72,25 @@ const pitchDeckSchema = new mongoose.Schema(
         },
       },
     ],
+    // Track sector analysis version
+    sectorAnalysisVersion: {
+      type: Number,
+      default: 0,
+    },
+    // Store history of sector analyses
+    sectorAnalysisHistory: [
+      {
+        version: Number,
+        sectorAnalysis: mongoose.Schema.Types.Mixed,
+        analysisRaw: String,
+        analysisDate: Date,
+        aiModel: String,
+        createdBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+        },
+      },
+    ],
     status: {
       type: String,
       enum: ["UPLOADED", "ANALYZING", "COMPLETED", "FAILED"],

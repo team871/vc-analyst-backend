@@ -1,0 +1,32 @@
+[Unit]
+Description=VC Analyst Backend API Service
+After=network.target mongod.service
+Wants=mongod.service
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/vc-analyst
+Environment="NODE_ENV=production"
+Environment="PORT=5000"
+ExecStart=/usr/bin/node /opt/vc-analyst/server.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vc-analyst
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/vc-analyst/uploads /opt/vc-analyst/logs
+
+# Resource limits
+LimitNOFILE=65536
+MemoryLimit=2G
+
+[Install]
+WantedBy=multi-user.target
+
