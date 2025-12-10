@@ -62,19 +62,20 @@ else
     echo "Certbot is already installed"
 fi
 
-# Create Nginx configuration
+# Create Nginx configuration (HTTP only first, Certbot will add SSL)
 echo ""
 echo "Step 3: Creating Nginx configuration..."
 NGINX_CONF="/etc/nginx/conf.d/vc-analyst.conf"
 
 cat > "$NGINX_CONF" <<EOF
 # VC Analyst Backend - Nginx Configuration
+# SSL will be added by Certbot automatically
 upstream vc_analyst {
     server localhost:${APP_PORT};
     keepalive 64;
 }
 
-# HTTP server - redirect to HTTPS
+# HTTP server (will be upgraded to HTTPS by Certbot)
 server {
     listen 80;
     listen [::]:80;
@@ -84,30 +85,6 @@ server {
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
     }
-
-    # Redirect all HTTP to HTTPS
-    location / {
-        return 301 https://\$server_name\$request_uri;
-    }
-}
-
-# HTTPS server
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${DOMAIN};
-
-    # SSL configuration (will be updated by Certbot)
-    # ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
-    # ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
-    # include /etc/letsencrypt/options-ssl-nginx.conf;
-    # ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
-
-    # Security headers
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
 
     # Logging
     access_log /var/log/nginx/vc-analyst-access.log;
