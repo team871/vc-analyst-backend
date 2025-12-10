@@ -22,11 +22,21 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "Project directory: $PROJECT_DIR"
 
-# Step 1: Run setup script
+# Step 1: Fix permissions and run setup script
 echo ""
 echo "Step 1: Running EC2 setup..."
 cd "$PROJECT_DIR"
-chmod +x scripts/setup-ec2.sh
+
+# Fix ownership if needed
+if [ ! -w "scripts/setup-ec2.sh" ]; then
+    echo "Fixing file ownership..."
+    sudo chown -R $USER:$USER "$PROJECT_DIR"
+fi
+
+# Make scripts executable (ignore errors if already executable)
+chmod +x scripts/setup-ec2.sh 2>/dev/null || true
+chmod +x scripts/deploy.sh 2>/dev/null || true
+
 ./scripts/setup-ec2.sh
 
 # Step 2: Check for .env file
@@ -74,7 +84,8 @@ fi
 # Step 3: Run deployment script
 echo ""
 echo "Step 3: Deploying application..."
-chmod +x scripts/deploy.sh
+# Script should already be executable from Step 1, but ensure it is
+chmod +x scripts/deploy.sh 2>/dev/null || true
 ./scripts/deploy.sh
 
 echo ""
