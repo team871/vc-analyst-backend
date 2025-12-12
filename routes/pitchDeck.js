@@ -27,6 +27,8 @@ const {
   logPitchDeckDeleted,
 } = require("../utils/auditLogger");
 const { getOrganizationApiKey } = require("../utils/organizationApiKeys");
+const { downloadFromS3 } = require("../utils/s3Upload");
+const OpenAI = require("openai");
 
 const router = express.Router();
 
@@ -46,6 +48,441 @@ async function getPerplexityClient(organizationId) {
     timeout: 600000, // 10 minutes
     maxRetries: 3,
   });
+}
+
+// Helper: Get content from relevant supporting documents
+async function getRelevantSupportingDocumentContent(
+  userQuestion,
+  allSupportingDocs,
+  organizationId
+) {
+  if (!allSupportingDocs || allSupportingDocs.length === 0) {
+    return null;
+  }
+
+  // Keywords that suggest document-related questions
+  const documentKeywords = [
+    "document",
+    "file",
+    "attachment",
+    "supporting",
+    "uploaded",
+    "attached",
+    "balance sheet",
+    "financial",
+    "cap table",
+    "agreement",
+    "contract",
+    "statement",
+    "report",
+    "shareholder",
+    "equity",
+    "revenue",
+    "expense",
+    "profit",
+    "loss",
+    "assets",
+    "liabilities",
+  ];
+
+  const questionLower = userQuestion.toLowerCase();
+  const hasDocumentKeywords = documentKeywords.some((keyword) =>
+    questionLower.includes(keyword)
+  );
+
+  if (!hasDocumentKeywords) {
+    return null;
+  }
+
+  // Try to get OpenAI client for document analysis
+  try {
+    const openaiApiKey = await getOrganizationApiKey(organizationId, "openai");
+    if (!openaiApiKey) {
+      return null; // Can't analyze without OpenAI key
+    }
+
+    const openaiClient = new OpenAI({ apiKey: openaiApiKey });
+
+    // Create a prompt to identify relevant documents
+    const docList = allSupportingDocs
+      .map(
+        (doc, idx) =>
+          `${idx + 1}. ${doc.title}: ${doc.description || "No description"}`
+      )
+      .join("\n");
+
+    const relevancePrompt = `Given this user question: "${userQuestion}"
+
+And these available supporting documents (uploaded in previous conversations):
+${docList}
+
+Identify which document(s) are most relevant to answering this question. Return a JSON object with document indices (1-based) that are relevant, or an empty array if none are relevant.
+
+Example response: {"relevantDocs": [1, 3]}`;
+
+    const relevanceResponse = await openaiClient.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: relevancePrompt }],
+      response_format: { type: "json_object" },
+      temperature: 0.3,
+    });
+
+    const parsed = tryParseJson(relevanceResponse.choices[0].message.content);
+    const relevantIndices = parsed?.relevantDocs || [];
+    if (relevantIndices.length === 0) {
+      return null;
+    }
+
+    // Get relevant documents
+    const relevantDocs = allSupportingDocs.filter((_, idx) =>
+      relevantIndices.includes(idx + 1)
+    );
+
+    // Download and extract content from relevant documents
+    const docsWithContent = await Promise.all(
+      relevantDocs.map(async (doc) => {
+        try {
+          if (!doc.fileKey) {
+            return {
+              title: doc.title,
+              description: doc.description,
+              content: null,
+              error: "No file key available",
+            };
+          }
+
+          // Download file from S3
+          const fileBuffer = await downloadFromS3(doc.fileKey);
+          const fileType = doc.metadata?.fileType || "application/pdf";
+          const fileName = doc.title;
+
+          // Extract content based on file type
+          const path = require("path");
+          const fileExtension = path.extname(fileName).toLowerCase();
+          const isPDF = fileExtension === ".pdf";
+          const isText = [".txt", ".csv", ".md"].includes(fileExtension);
+          const isImage = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(
+            fileExtension
+          );
+
+          let content = null;
+
+          if (isText) {
+            // For text files, read directly
+            content = fileBuffer.toString("utf8").substring(0, 5000); // Limit to 5k chars
+          } else if (isPDF) {
+            // For PDFs, use OpenAI to extract text
+            const fs = require("fs");
+            const os = require("os");
+            const tempDir = os.tmpdir();
+            const tempFilePath = path.join(
+              tempDir,
+              `supporting-doc-${Date.now()}-${Math.random()
+                .toString(36)
+                .substring(7)}.pdf`
+            );
+
+            try {
+              fs.writeFileSync(tempFilePath, fileBuffer);
+
+              // Upload to OpenAI
+              const uploadedFile = await openaiClient.files.create({
+                file: fs.createReadStream(tempFilePath),
+                purpose: "assistants",
+              });
+
+              // Wait for processing
+              await new Promise((resolve) => setTimeout(resolve, 3000));
+              let fileStatus = await openaiClient.files.retrieve(
+                uploadedFile.id
+              );
+              let retries = 0;
+              while (fileStatus.status !== "processed" && retries < 10) {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                fileStatus = await openaiClient.files.retrieve(uploadedFile.id);
+                retries++;
+              }
+
+              if (fileStatus.status === "processed") {
+                // Extract text from PDF using OpenAI
+                const extractPrompt = `Extract the main text content from this PDF document. Return only the text content, no formatting or explanations. Limit to the first 5000 characters if the document is very long.`;
+
+                const extraction = await openaiClient.chat.completions.create({
+                  model: "gpt-4o",
+                  messages: [
+                    {
+                      role: "user",
+                      content: [
+                        { type: "text", text: extractPrompt },
+                        {
+                          type: "file",
+                          file_id: uploadedFile.id,
+                        },
+                      ],
+                    },
+                  ],
+                });
+
+                content = extraction.choices[0].message.content;
+              }
+
+              // Cleanup
+              fs.unlinkSync(tempFilePath);
+              await openaiClient.files.del(uploadedFile.id).catch(() => {});
+            } catch (err) {
+              console.error(`Error extracting content from ${doc.title}:`, err);
+              content = null;
+            }
+          } else if (isImage) {
+            // For images, use vision API to describe
+            const base64Image = fileBuffer.toString("base64");
+            const imageDataUrl = `data:${fileType};base64,${base64Image}`;
+
+            const imagePrompt = `Describe the content of this image/document in detail. Focus on any text, numbers, charts, or important information visible.`;
+
+            const visionResponse = await openaiClient.chat.completions.create({
+              model: "gpt-4o",
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    { type: "text", text: imagePrompt },
+                    {
+                      type: "image_url",
+                      image_url: { url: imageDataUrl },
+                    },
+                  ],
+                },
+              ],
+            });
+
+            content = visionResponse.choices[0].message.content;
+          }
+
+          return {
+            title: doc.title,
+            description: doc.description,
+            content: content,
+            fileType: fileType,
+          };
+        } catch (error) {
+          console.error(
+            `Error processing supporting document ${doc.title}:`,
+            error
+          );
+          return {
+            title: doc.title,
+            description: doc.description,
+            content: null,
+            error: error.message,
+          };
+        }
+      })
+    );
+
+    return docsWithContent.filter((doc) => doc.content !== null);
+  } catch (error) {
+    console.error("Error determining relevant supporting documents:", error);
+    return null;
+  }
+}
+
+// Helper: Extract content from ALL data room documents (always, not just when relevant)
+async function extractAllDataRoomDocumentContent(
+  allDataRoomDocs,
+  organizationId
+) {
+  if (!allDataRoomDocs || allDataRoomDocs.length === 0) {
+    return [];
+  }
+
+  // Try to get OpenAI client for document analysis
+  try {
+    const openaiApiKey = await getOrganizationApiKey(organizationId, "openai");
+    if (!openaiApiKey) {
+      return []; // Can't analyze without OpenAI key
+    }
+
+    const openaiClient = new OpenAI({ apiKey: openaiApiKey });
+
+    // Download and extract content from ALL documents
+    const docsWithContent = await Promise.all(
+      allDataRoomDocs.map(async (doc) => {
+        try {
+          if (!doc.fileKey) {
+            return {
+              title: doc.title,
+              category: doc.category,
+              summary: doc.aiSummary || doc.description,
+              content: null,
+              error: "No file key available",
+            };
+          }
+
+          // Download file from S3
+          const fileBuffer = await downloadFromS3(doc.fileKey);
+
+          const fileType = doc.metadata?.fileType || "application/pdf";
+          const fileName = doc.title;
+
+          // Extract content based on file type
+          const path = require("path");
+          const fileExtension = path.extname(fileName).toLowerCase();
+          const isPDF = fileExtension === ".pdf";
+          const isText = [".txt", ".csv", ".md"].includes(fileExtension);
+          const isImage = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(
+            fileExtension
+          );
+
+          let content = null;
+
+          if (isText) {
+            // For text files, read directly - extract FULL content
+            content = fileBuffer.toString("utf8"); // Full content, no limit
+          } else if (isPDF) {
+            // For PDFs, use OpenAI to extract text
+            const fs = require("fs");
+            const os = require("os");
+            const tempDir = os.tmpdir();
+            const tempFilePath = path.join(
+              tempDir,
+              `data-room-doc-${Date.now()}-${Math.random()
+                .toString(36)
+                .substring(7)}.pdf`
+            );
+
+            try {
+              fs.writeFileSync(tempFilePath, fileBuffer);
+
+              // Upload to OpenAI
+              const uploadedFile = await openaiClient.files.create({
+                file: fs.createReadStream(tempFilePath),
+                purpose: "assistants",
+              });
+
+              // Wait for processing
+              await new Promise((resolve) => setTimeout(resolve, 3000));
+              let fileStatus = await openaiClient.files.retrieve(
+                uploadedFile.id
+              );
+
+              let retries = 0;
+              while (fileStatus.status !== "processed" && retries < 10) {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                fileStatus = await openaiClient.files.retrieve(uploadedFile.id);
+                retries++;
+              }
+
+              if (fileStatus.status === "processed") {
+                // Extract text from PDF using OpenAI - extract FULL content
+                const extractPrompt = `Extract ALL the text content from this PDF document. Return the complete text content, preserving important details, numbers, and information. Include all relevant data, tables, and text. Do not summarize or truncate - provide the full content.`;
+
+                const extraction = await openaiClient.chat.completions.create({
+                  model: "gpt-4o",
+                  messages: [
+                    {
+                      role: "user",
+                      content: [
+                        { type: "text", text: extractPrompt },
+                        {
+                          type: "file",
+                          file: {
+                            file_id: uploadedFile.id,
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                });
+
+                content = extraction.choices[0].message.content;
+              }
+
+              // Cleanup
+              fs.unlinkSync(tempFilePath);
+            } catch (err) {
+              console.error(
+                `[DATA-ROOM] Error extracting content from ${doc.title}:`,
+                err
+              );
+              content = null;
+            }
+          } else if (isImage) {
+            // For images, use vision API to describe
+            const base64Image = fileBuffer.toString("base64");
+            const imageDataUrl = `data:${fileType};base64,${base64Image}`;
+
+            const imagePrompt = `Describe the content of this image/document in detail. Focus on any text, numbers, charts, or important information visible.`;
+
+            const visionResponse = await openaiClient.chat.completions.create({
+              model: "gpt-4o",
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    { type: "text", text: imagePrompt },
+                    {
+                      type: "image_url",
+                      image_url: { url: imageDataUrl },
+                    },
+                  ],
+                },
+              ],
+            });
+
+            content = visionResponse.choices[0].message.content;
+          }
+
+          return {
+            title: doc.title,
+            category: doc.category,
+            summary: doc.aiSummary || doc.description,
+            content: content,
+            fileType: fileType,
+          };
+        } catch (error) {
+          console.error(
+            `[DATA-ROOM] Error processing data room document ${doc.title}:`,
+            error
+          );
+          return {
+            title: doc.title,
+            category: doc.category,
+            summary: doc.aiSummary || doc.description,
+            content: null,
+            error: error.message,
+          };
+        }
+      })
+    );
+
+    // Return all documents (even if content extraction failed, include them with error info)
+    const withContent = docsWithContent.filter((doc) => doc.content !== null);
+    if (withContent.length < docsWithContent.length) {
+      console.log(
+        `[DATA-ROOM] Extracted content from ${withContent.length}/${docsWithContent.length} documents`
+      );
+    }
+
+    return docsWithContent; // Return all, including those without content
+  } catch (error) {
+    console.error("Error extracting content from data room documents:", error);
+    return [];
+  }
+}
+
+// Helper: Determine if user question relates to data room documents (kept for backward compatibility)
+async function getRelevantDocumentContent(
+  userQuestion,
+  allDataRoomDocs,
+  organizationId
+) {
+  // This function is now deprecated - we always extract all documents
+  // But keeping it for backward compatibility
+  return await extractAllDataRoomDocumentContent(
+    allDataRoomDocs,
+    organizationId
+  );
 }
 
 // Helper: normalize analysis object (clean weird summary formatting, code fences, nested JSON, etc.)
@@ -1451,13 +1888,10 @@ router.patch(
         return res.status(404).json({ message: "Document not found" });
       }
 
-      // Download file from S3 for summary generation
-      const { downloadFromS3 } = require("../utils/s3Upload");
-      const fileBuffer = await downloadFromS3(document.fileKey);
-
-      // Generate new summary
+      // Generate new summary using S3 file key (will download internally)
+      // This is more efficient than downloading separately
       const summaryResult = await generateDocumentSummary(
-        fileBuffer,
+        document.fileKey, // Pass S3 key instead of buffer
         document.title,
         document.metadata.fileType,
         req.user.organization._id
@@ -1987,28 +2421,91 @@ async function reanalyzeWithContext(
       })
       .join("\n\n");
 
-    // Build supporting docs context
-    const supportingDocsContext =
-      allSupportingDocs.length > 0
-        ? `\n\nSupporting Documents Available:\n${allSupportingDocs
-            .map(
-              (doc) => `- ${doc.title}: ${doc.description || "No description"}`
-            )
-            .join("\n")}`
-        : "";
+    // Build supporting docs context - try to get relevant document content
+    let supportingDocsContext = "";
+    if (allSupportingDocs.length > 0) {
+      // Try to get relevant document content if question is document-related
+      const relevantSupportingDocs = await getRelevantSupportingDocumentContent(
+        currentUserMessage,
+        allSupportingDocs,
+        pitchDeck.organization
+      );
 
-    // Build data room documents context with AI summaries
-    const dataRoomDocsContext =
-      allDataRoomDocs.length > 0
-        ? `\n\nData Room Documents Shared:\n${allDataRoomDocs
-            .map(
-              (doc) =>
-                `- ${doc.title}${doc.category ? ` (${doc.category})` : ""}: ${
-                  doc.aiSummary || doc.description || "No summary available"
-                }`
-            )
-            .join("\n")}`
-        : "";
+      if (relevantSupportingDocs && relevantSupportingDocs.length > 0) {
+        // Enhanced context with relevant documents and their content
+        const docsList = allSupportingDocs
+          .map((doc) => {
+            const relevantDoc = relevantSupportingDocs.find(
+              (rd) => rd.title === doc.title
+            );
+            if (relevantDoc && relevantDoc.content) {
+              return `⭐ RELEVANT: ${doc.title}: ${
+                doc.description || "No description"
+              }\n   Content: ${relevantDoc.content.substring(0, 2000)}...`;
+            }
+            return `- ${doc.title}: ${doc.description || "No description"}`;
+          })
+          .join("\n");
+
+        supportingDocsContext = `\n\nSupporting Documents Available:\n${docsList}\n\nIMPORTANT: The documents marked with ⭐ are particularly relevant to the current question and their content has been extracted above. Use this information when answering.`;
+      } else {
+        // Standard context with all documents (metadata only)
+        supportingDocsContext = `\n\nSupporting Documents Available:\n${allSupportingDocs
+          .map(
+            (doc) => `- ${doc.title}: ${doc.description || "No description"}`
+          )
+          .join("\n")}`;
+      }
+    }
+
+    // Build data room documents context - ALWAYS extract full content from ALL documents
+    let dataRoomDocsContext = "";
+    if (allDataRoomDocs.length > 0) {
+      // ALWAYS extract content from ALL data room documents for analysis
+      const docsWithContent = await extractAllDataRoomDocumentContent(
+        allDataRoomDocs,
+        pitchDeck.organization
+      );
+
+      if (docsWithContent && docsWithContent.length > 0) {
+        // Build context with all documents and their extracted content
+        const docsList = docsWithContent
+          .map((doc) => {
+            if (doc.content) {
+              // Include full content (up to 10000 chars per document for comprehensive analysis)
+              const contentPreview = doc.content.substring(0, 10000);
+              return `⭐ ${doc.title}${
+                doc.category ? ` (${doc.category})` : ""
+              }: ${
+                doc.summary || doc.description || "No summary available"
+              }\n   Full Content: ${contentPreview}${
+                doc.content.length > 10000 ? "..." : ""
+              }`;
+            } else {
+              return `- ${doc.title}${
+                doc.category ? ` (${doc.category})` : ""
+              }: ${doc.summary || doc.description || "No summary available"} ${
+                doc.error
+                  ? `(Error: ${doc.error})`
+                  : "(Content extraction failed)"
+              }`;
+            }
+          })
+          .join("\n\n");
+
+        dataRoomDocsContext = `\n\nData Room Documents (Full Content Extracted):\n${docsList}\n\nIMPORTANT: All data room documents have been analyzed and their full content is provided above. Use this detailed information when answering questions or performing analysis.`;
+      } else {
+        // Fallback: Standard context with metadata only
+        dataRoomDocsContext = `\n\nData Room Documents Shared:\n${allDataRoomDocs
+          .map(
+            (doc) =>
+              `- ${doc.title}${doc.category ? ` (${doc.category})` : ""}: ${
+                doc.aiSummary || doc.description || "No summary available"
+              }`
+          )
+          .join("\n")}`;
+      }
+    }
 
     // Determine if this requires full re-analysis or just a conversational answer
     const hasAttachments = newAttachments.length > 0;
@@ -2050,6 +2547,7 @@ ${hasAttachments ? "New files/documents have been attached." : ""}
 Rules:
 • Extract insights from the pitch deck and any new information provided — no external data or assumptions.
 • Do NOT perform external web search in this step; focus purely on deck content and provided information.
+• Use information from supporting documents (marked with ⭐) and data room documents when available to enhance the analysis.
 • If information is missing, mark as "unknown" and briefly note what's missing.
 • Be objective, evidence-based, and avoid speculation or hype.
 • Summaries must be concise yet capture key strategic and financial details.
@@ -2219,6 +2717,9 @@ Rules:
 • For "minor_edit", provide specific edits with exact paths and values - only edit what was requested
 • Be objective, evidence-based, and avoid speculation
 • If the analyst asks about shared documents (e.g., "What documents have been shared?", "What's in the data room?", "List all documents"), provide a comprehensive list of all data room documents with their AI-generated summaries
+• When answering questions that relate to data room documents (marked with ⭐), use information from those document summaries to provide accurate, specific answers
+• When answering questions that relate to supporting documents (marked with ⭐), use the extracted content provided above to give detailed, accurate answers
+• If a question asks about financials, legal matters, or technical details that might be in documents, reference the relevant documents and use their content in your answer
 • If uncertain, choose "conversational" and offer to do full re-analysis if needed
 
 Current analyst message: "${userMessageContent}"`;
